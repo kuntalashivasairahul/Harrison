@@ -11,6 +11,10 @@ from rank_bm25 import BM25Okapi
 from rerank import rerank
 
 
+# Reciprocal Rank Fusion hyperparameter (standard choice ~60)
+RRF_K = 60
+
+
 # Load chunks metadata
 BASE_DIR = Path(__file__).resolve().parent
 CHUNKS_PATH = BASE_DIR / "vectorstore" / "chunks.json"
@@ -84,15 +88,16 @@ def _hybrid_candidates(
     bm25_k: int,
 ) -> List[Dict]:
     """
-    Run FAISS + BM25, merge and deduplicate candidates by chunk_id.
+    Run FAISS + BM25, merge and deduplicate candidates by chunk_id,
+    and compute RRF scores based on individual ranks.
     """
     candidates_by_id: Dict[int, Dict] = {}
 
-    # --- FAISS branch (kept as before) ---
+    # --- FAISS branch (vector search) ---
     if index is not None:
         q_emb = embed_text(query)
         distances, ids = index.search(q_emb, k)
-        for dist, idx in zip(distances[0], ids[0]):
+        for rank, (dist, idx) in enumerate(zip(distances[0], ids[0]), start=1):
             try:
                 idx = int(idx)
             except Exception:
@@ -107,15 +112,19 @@ def _hybrid_candidates(
                 "page": chunk.get("page"),
                 "text": text,
                 "distance": float(dist),
+                "faiss_rank": rank,
             }
             if existing is None:
                 candidates_by_id[idx] = base
             else:
-                # keep the best (smallest) distance and ensure we don't lose text/page
+                # keep the best (smallest) distance and best rank; preserve text/page
                 if base["distance"] < existing.get("distance", float("inf")):
                     existing.update(base)
+                prev_rank = existing.get("faiss_rank")
+                if prev_rank is None or rank < prev_rank:
+                    existing["faiss_rank"] = rank
 
-    # --- BM25 branch ---
+    # --- BM25 branch (lexical search) ---
     if bm25 is not None and chunks:
         query_tokens = _tokenize(query)
         if query_tokens:
@@ -124,7 +133,7 @@ def _hybrid_candidates(
             indexed_scores = list(enumerate(scores))
             indexed_scores.sort(key=lambda x: x[1], reverse=True)
             top_bm25 = indexed_scores[:bm25_k]
-            for idx, score in top_bm25:
+            for rank, (idx, score) in enumerate(top_bm25, start=1):
                 if idx < 0 or idx >= len(chunks):
                     continue
                 chunk = chunks[idx]
@@ -135,14 +144,29 @@ def _hybrid_candidates(
                     "page": chunk.get("page"),
                     "text": text,
                     "bm25_score": float(score),
+                    "bm25_rank": rank,
                 }
                 if existing is None:
                     candidates_by_id[idx] = bm25_info
                 else:
-                    # augment existing with bm25_score if better
+                    # augment existing with best bm25_score and rank
                     prev_score = existing.get("bm25_score", float("-inf"))
                     if score > prev_score:
                         existing["bm25_score"] = float(score)
+                    prev_rank = existing.get("bm25_rank")
+                    if prev_rank is None or rank < prev_rank:
+                        existing["bm25_rank"] = rank
+
+    # --- RRF fusion ---
+    for cand in candidates_by_id.values():
+        rrf_score = 0.0
+        faiss_rank = cand.get("faiss_rank")
+        bm25_rank = cand.get("bm25_rank")
+        if faiss_rank is not None:
+            rrf_score += 1.0 / (RRF_K + faiss_rank)
+        if bm25_rank is not None:
+            rrf_score += 1.0 / (RRF_K + bm25_rank)
+        cand["rrf_score"] = rrf_score
 
     return list(candidates_by_id.values())
 
@@ -153,34 +177,72 @@ def _pretrim_for_rerank(
     rerank_pool: int,
 ) -> List[Dict]:
     """
-    Filter low-value texts, then choose a pool for reranking.
-    Prioritise candidates that are strong in either FAISS distance or BM25.
+    Apply low-value filtering, RRF-based ranking, and neighbor expansion
+    to produce a capped pool for reranking.
     """
     if not candidates:
         return []
 
+    # 1) Filter low-value texts (fallback to originals if everything is filtered)
     filtered = [c for c in candidates if not is_low_value_text(c.get("text", ""))]
     if not filtered:
         filtered = candidates
 
     pool_size = max(final_k, rerank_pool)
 
-    def _score_for_sort(c: Dict) -> tuple:
-        has_vec = "distance" in c and c["distance"] is not None
-        has_bm = "bm25_score" in c and c["bm25_score"] is not None
-        # candidates that appear in both get highest priority
-        both_bonus = 0
-        if has_vec and has_bm:
-            both_bonus = -2
-        elif has_vec or has_bm:
-            both_bonus = -1
+    def _sort_key(c: Dict) -> tuple:
+        # Primary: higher RRF score
+        rrf_score = c.get("rrf_score")
+        if rrf_score is None:
+            rrf_score = 0.0
+        # Secondary: FAISS distance (smaller is better)
         dist = c.get("distance", float("inf"))
+        # Tertiary: BM25 score (higher is better)
         bm = c.get("bm25_score")
-        bm_rank = -bm if bm is not None else 0.0  # higher bm25 is better
-        return (both_bonus, dist, bm_rank)
+        bm_component = -bm if bm is not None else 0.0
+        return (-rrf_score, dist, bm_component)
 
-    filtered.sort(key=_score_for_sort)
-    return filtered[:pool_size]
+    # 2) RRF-based sort and base pool selection
+    filtered.sort(key=_sort_key)
+    base_pool = filtered[:pool_size]
+
+    # 3) Neighbor chunk expansion (chunk_id -1, +1) with de-duplication
+    by_id: Dict[int, Dict] = {}
+    for c in base_pool:
+        cid = c.get("chunk_id")
+        if cid is None:
+            continue
+        by_id[cid] = c
+
+    for c in base_pool:
+        cid = c.get("chunk_id")
+        if cid is None:
+            continue
+        for neighbor_id in (cid - 1, cid + 1):
+            if neighbor_id < 0 or neighbor_id >= len(chunks):
+                continue
+            if neighbor_id in by_id:
+                continue
+            neighbor_chunk = chunks[neighbor_id]
+            neighbor_text = neighbor_chunk.get("text", "")
+            # neighbors still go through filtering
+            if is_low_value_text(neighbor_text):
+                continue
+            neighbor = {
+                "chunk_id": neighbor_id,
+                "page": neighbor_chunk.get("page"),
+                "text": neighbor_text,
+                # neighbors may not have distance / bm25_score; they are
+                # still valid for reranking based on text alone.
+                "rrf_score": c.get("rrf_score", 0.0) * 0.9,  # slightly below parent
+            }
+            by_id[neighbor_id] = neighbor
+
+    expanded = list(by_id.values())
+
+    # 4) Cap final rerank pool size for performance
+    expanded.sort(key=_sort_key)
+    return expanded[:rerank_pool]
 
 
 # --- Main retrieve() ---
@@ -211,7 +273,7 @@ def retrieve(
     # 1–3) Hybrid retrieval and deduplication
     candidates = _hybrid_candidates(query, k=k, bm25_k=bm25_k)
 
-    # 4–5) Filter + pre-trim for reranker
+    # 4–5) Filter + RRF sort + neighbor expansion to form rerank pool
     rerank_inputs = _pretrim_for_rerank(candidates, final_k=final_k, rerank_pool=rerank_pool)
 
     # 6) Cross-encoder rerank
@@ -244,6 +306,19 @@ def retrieve(
                     "page": r["page"],
                     "score": r["score"],
                     "distance": r["distance"],
+                    # optional extra diagnostics if present
+                    "faiss_rank": next(
+                        (c.get("faiss_rank") for c in candidates if c.get("chunk_id") == r["chunk_id"]),
+                        None,
+                    ),
+                    "bm25_rank": next(
+                        (c.get("bm25_rank") for c in candidates if c.get("chunk_id") == r["chunk_id"]),
+                        None,
+                    ),
+                    "rrf_score": next(
+                        (c.get("rrf_score") for c in candidates if c.get("chunk_id") == r["chunk_id"]),
+                        None,
+                    ),
                 }
                 for r in results
             ],
