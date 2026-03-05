@@ -53,6 +53,41 @@ except Exception as e:
     bm25 = None
 
 
+# --- Query expansion ---
+def expand_query(query: str, max_queries: int = 4) -> List[str]:
+    """
+    Simple rule-based query expansion for multi-query retrieval.
+    Always includes the original query and up to max_queries-1 variants.
+    """
+    q = (query or "").strip()
+    if not q:
+        return [q]
+
+    variants = {q}
+    lower = q.lower()
+
+    # Basic paraphrases geared towards textbook-style retrieval
+    variants.add(f"Harrison textbook explanation of {q}")
+    variants.add(f"clinical features, diagnosis and management of {q} in Harrison")
+    if not lower.startswith("what is"):
+        variants.add(f"What is {q}?")
+    variants.add(f"high-yield summary of {q} from Harrison")
+
+    # Preserve insertion order while enforcing max_queries
+    ordered: List[str] = []
+    for v in variants:
+        if v not in ordered:
+            ordered.append(v)
+        if len(ordered) >= max_queries:
+            break
+
+    # Ensure original query is first
+    if q in ordered:
+        ordered.remove(q)
+    ordered.insert(0, q)
+    return ordered[:max_queries]
+
+
 # --- Filtering utilities ---
 def is_low_value_text(text: str) -> bool:
     """
@@ -254,12 +289,12 @@ def retrieve(
     bm25_k: int = 30,
 ) -> List[Dict]:
     """
-    Hybrid retrieval:
-    1) FAISS vector search for top-k
-    2) BM25 lexical search for top-bm25_k
-    3) Merge + deduplicate by chunk_id
-    4) Filter low-value chunks
-    5) Pre-trim to a rerank pool
+    Multi-query hybrid retrieval:
+    1) Expand query into up to 4 variants
+    2) For each variant, run FAISS + BM25 hybrid retrieval with RRF
+    3) Merge + deduplicate by chunk_id across queries
+    4) Filter low-value chunks + RRF sort
+    5) Neighbor expansion to form rerank pool
     6) Cross-encoder rerank to pick top final_k
     """
 
@@ -270,11 +305,42 @@ def retrieve(
     if bm25_k is None:
         bm25_k = k
 
-    # 1–3) Hybrid retrieval and deduplication
-    candidates = _hybrid_candidates(query, k=k, bm25_k=bm25_k)
+    # 1) Expand query (always includes original)
+    expanded_queries = expand_query(query, max_queries=4)
+
+    # 2) Run hybrid retrieval per expanded query
+    per_query_candidates: List[List[Dict]] = []
+    total_before_merge = 0
+    for q in expanded_queries:
+        cands = _hybrid_candidates(q, k=k, bm25_k=bm25_k)
+        per_query_candidates.append(cands)
+        total_before_merge += len(cands)
+
+    # 3) Merge and deduplicate strictly by chunk_id across queries,
+    #    keeping the best candidate metadata (based on RRF score).
+    merged_by_id: Dict[int, Dict] = {}
+    for cands in per_query_candidates:
+        for c in cands:
+            cid = c.get("chunk_id")
+            if cid is None:
+                continue
+            existing = merged_by_id.get(cid)
+            if existing is None:
+                merged_by_id[cid] = c
+            else:
+                # choose candidate with higher RRF score (or fallback to presence of score)
+                new_rrf = c.get("rrf_score")
+                old_rrf = existing.get("rrf_score")
+                if old_rrf is None and new_rrf is not None:
+                    merged_by_id[cid] = c
+                elif new_rrf is not None and old_rrf is not None and new_rrf > old_rrf:
+                    merged_by_id[cid] = c
+
+    merged_candidates = list(merged_by_id.values())
+    total_after_merge = len(merged_candidates)
 
     # 4–5) Filter + RRF sort + neighbor expansion to form rerank pool
-    rerank_inputs = _pretrim_for_rerank(candidates, final_k=final_k, rerank_pool=rerank_pool)
+    rerank_inputs = _pretrim_for_rerank(merged_candidates, final_k=final_k, rerank_pool=rerank_pool)
 
     # 6) Cross-encoder rerank
     top_candidates = rerank(query, rerank_inputs, top_n=final_k)
@@ -297,7 +363,10 @@ def retrieve(
         log_obj = {
             "time": time.time(),
             "query": query,
-            "candidates_count": len(candidates),
+            "expanded_queries": expanded_queries,
+            "candidate_count_before_merge": total_before_merge,
+            "candidate_count_after_merge": total_after_merge,
+            "candidates_count": len(merged_candidates),
             "filtered_count": len(rerank_inputs),
             "final_count": len(results),
             "results": [
@@ -308,15 +377,15 @@ def retrieve(
                     "distance": r["distance"],
                     # optional extra diagnostics if present
                     "faiss_rank": next(
-                        (c.get("faiss_rank") for c in candidates if c.get("chunk_id") == r["chunk_id"]),
+                        (c.get("faiss_rank") for c in merged_candidates if c.get("chunk_id") == r["chunk_id"]),
                         None,
                     ),
                     "bm25_rank": next(
-                        (c.get("bm25_rank") for c in candidates if c.get("chunk_id") == r["chunk_id"]),
+                        (c.get("bm25_rank") for c in merged_candidates if c.get("chunk_id") == r["chunk_id"]),
                         None,
                     ),
                     "rrf_score": next(
-                        (c.get("rrf_score") for c in candidates if c.get("chunk_id") == r["chunk_id"]),
+                        (c.get("rrf_score") for c in merged_candidates if c.get("chunk_id") == r["chunk_id"]),
                         None,
                     ),
                 }
