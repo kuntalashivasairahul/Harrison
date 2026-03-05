@@ -60,13 +60,15 @@ def verify_answer(answer: str, context: str, mode: str = "qa", model: str = "lla
   verify_prompt = (
       "You are HarrisonGPT, verifying a draft answer against Harrison’s Principles of Internal Medicine.\n\n"
       "You will be given:\n"
-      "1) Harrison context\n"
+      "1) Harrison context (with page markers like [p:2157|c:5769])\n"
       "2) A draft answer that was supposed to use ONLY that context.\n\n"
       "Your task:\n"
       "- Check every clinical and factual statement in the draft answer.\n"
       "- Keep ONLY statements that are directly supported by the context.\n"
       "- Remove or rewrite any statement that is not clearly supported.\n"
       "- Do NOT add new information that is absent from the context.\n"
+      "- Ensure that any page citations in square brackets [p:...] correspond to page markers that actually appear in the context.\n"
+      "- Do NOT invent new page numbers; delete or fix unsupported citations.\n"
       "- Preserve the structure, section headings, and formatting as much as possible.\n"
       "- If very little is supported, return a short answer stating:\n"
       f'  \"{REFUSAL_STR}\"\n\n'
@@ -87,7 +89,7 @@ def verify_answer(answer: str, context: str, mode: str = "qa", model: str = "lla
         messages=[
             {
                 "role": "system",
-                "content": "You are verifying that the answer uses only the provided Harrison context. Do not add new information.",
+                "content": "You are verifying that the answer uses only the provided Harrison context. Do not add new information, and do not invent page citations.",
             },
             {"role": "user", "content": verify_user},
         ],
@@ -111,6 +113,16 @@ BASE_QA_PROMPT = """You are HarrisonGPT, a medical reasoning assistant.
 Use ONLY the provided Harrison’s Principles of Internal Medicine context.
 Do NOT add information not present in the context.
 
+The context lines may include page and chunk markers such as:
+- Some fact about disease X [p:2157|c:5769]
+
+When you use information from the context, you MUST:
+- Cite the page numbers in square brackets using the same markers.
+- Example: "Severe anemia can cause oxygen supply-demand imbalance [p:2157]."
+- If multiple distinct pages support a statement, you may write: "[p:2157, p:2159]".
+- Only reuse page markers that actually appear in the context.
+- Never invent or guess new page numbers.
+
 Guidelines:
 - Answer in a clinical, textbook-oriented style.
 - Structure the response with clear headings where appropriate.
@@ -122,6 +134,16 @@ Guidelines:
 SMART_SUMMARY_PROMPT = """You are HarrisonGPT, a medical reasoning assistant designed to generate
 high-fidelity, exam-relevant summaries extracted ONLY from the provided
 Harrison’s Principles of Internal Medicine context.
+
+The context lines may include page and chunk markers such as:
+- Some fact about disease X [p:2157|c:5769]
+
+When you use information from the context, you MUST:
+- Cite the page numbers in square brackets using the same markers.
+- Example: "Severe anemia can cause oxygen supply-demand imbalance [p:2157]."
+- If multiple distinct pages support a statement, you may write: "[p:2157, p:2159]".
+- Only reuse page markers that actually appear in the context.
+- Never invent or guess new page numbers.
 
 Your task: Convert the provided Harrison material into a high-density,
 exam-focused smart summary that preserves the exact essence, terminology,
