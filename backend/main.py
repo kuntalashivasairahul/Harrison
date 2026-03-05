@@ -9,6 +9,7 @@ import rag
 
 from rag import retrieve
 from fusion import fuse_context
+from evidence import extract_evidence
 from llm import ask_llm
 
 app = FastAPI(title="HarrisonGPT")
@@ -49,11 +50,15 @@ def ask_question(req: QueryRequest):
     # 2️⃣ Fuse context
     fused_context = fuse_context(retrieved_chunks)
 
-    # 3️⃣ Ask LLM
+    # 3️⃣ Extract structured evidence statements
+    evidence = extract_evidence(retrieved_chunks)
+
+    # 4️⃣ Ask LLM
     answer = ask_llm(
         fused_context=fused_context,
         question=query,
-        mode=mode
+        mode=mode,
+        evidence=evidence,
     )
 
     return {
