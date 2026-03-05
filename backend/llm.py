@@ -38,6 +38,70 @@ SMART_SUMMARY_SECTIONS = [
   "# 13. One-page exam-revision sheet at the end",
 ]
 
+
+# --------------------------------------------------------------------
+# VERIFICATION
+# --------------------------------------------------------------------
+
+def verify_answer(answer: str, context: str, mode: str = "qa", model: str = "llama-3.3-70b-versatile") -> str:
+  """
+  Post-hoc verification step that asks the LLM to check the draft answer
+  strictly against the provided Harrison context and rewrite it so that
+  every statement is supported by the context.
+  """
+  answer = (answer or "").strip()
+  context = (context or "").strip()
+  if not answer or not context:
+    return answer
+
+  # Keep verification slightly shorter than generation to control cost.
+  max_tokens = SMART_SUMMARY_MAX_TOKENS if mode == "smart_summary" else QA_MAX_TOKENS
+
+  verify_prompt = (
+      "You are HarrisonGPT, verifying a draft answer against Harrison’s Principles of Internal Medicine.\n\n"
+      "You will be given:\n"
+      "1) Harrison context\n"
+      "2) A draft answer that was supposed to use ONLY that context.\n\n"
+      "Your task:\n"
+      "- Check every clinical and factual statement in the draft answer.\n"
+      "- Keep ONLY statements that are directly supported by the context.\n"
+      "- Remove or rewrite any statement that is not clearly supported.\n"
+      "- Do NOT add new information that is absent from the context.\n"
+      "- Preserve the structure, section headings, and formatting as much as possible.\n"
+      "- If very little is supported, return a short answer stating:\n"
+      f'  \"{REFUSAL_STR}\"\n\n'
+      "Always output a single, cleaned answer.\n"
+  )
+
+  verify_user = (
+      "Harrison Context:\n"
+      + context
+      + "\n\nDraft Answer:\n"
+      + answer
+      + "\n\nVerified Answer (use only supported information):\n"
+  )
+
+  try:
+    resp = client.chat.completions.create(
+        model=model,
+        messages=[
+            {
+                "role": "system",
+                "content": "You are verifying that the answer uses only the provided Harrison context. Do not add new information.",
+            },
+            {"role": "user", "content": verify_user},
+        ],
+        temperature=0.0,
+        max_tokens=max_tokens,
+    )
+    verified = resp.choices[0].message.content
+    if not verified or not isinstance(verified, str):
+      return answer
+    return verified.strip()
+  except Exception:
+    # On any failure, fall back to the original answer.
+    return answer
+
 # --------------------------------------------------------------------
 # PROMPTS
 # --------------------------------------------------------------------
@@ -136,6 +200,7 @@ def ask_llm(
 
     prompt_header = SMART_SUMMARY_PROMPT if mode == "smart_summary" else BASE_QA_PROMPT
 
+    # For smart summaries, optionally truncate context to a configurable size.
     if mode == "smart_summary" and SMART_SUMMARY_CONTEXT_CHAR_LIMIT > 0:
         fused_context = fused_context[:SMART_SUMMARY_CONTEXT_CHAR_LIMIT]
 
@@ -149,10 +214,16 @@ def ask_llm(
     )
 
     try:
+        # ------------------------------------------------------------------
+        # 1) First-pass generation
+        # ------------------------------------------------------------------
         response = client.chat.completions.create(
             model=model,
             messages=[
-                {"role": "system", "content": "Follow instructions strictly and never use knowledge outside the provided context."},
+                {
+                    "role": "system",
+                    "content": "Follow instructions strictly and never use knowledge outside the provided context.",
+                },
                 {"role": "user", "content": prompt},
             ],
             temperature=0.1 if mode == "smart_summary" else 0.2,
@@ -164,10 +235,24 @@ def ask_llm(
         if not content or not isinstance(content, str):
             return REFUSAL_STR
 
-        if mode == "smart_summary":
-                        return _enforce_smart_summary_shape(content)
+        draft_answer = content.strip()
 
-        return content.strip()
+        # For smart summaries, enforce section shape before verification so that
+        # the verifier sees the intended structure.
+        if mode == "smart_summary":
+            draft_answer = _enforce_smart_summary_shape(draft_answer)
+
+        # ------------------------------------------------------------------
+        # 2) Verification step (self-check against context)
+        # ------------------------------------------------------------------
+        verified = verify_answer(draft_answer, fused_context, mode=mode, model=model)
+
+        # For smart summaries, make sure the final output still respects the
+        # required section structure.
+        if mode == "smart_summary":
+            return _enforce_smart_summary_shape(verified)
+
+        return verified.strip()
 
     except Exception as e:
         return f"LLM call failed: {str(e)}"

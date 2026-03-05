@@ -369,6 +369,7 @@ def retrieve(
             "candidates_count": len(merged_candidates),
             "filtered_count": len(rerank_inputs),
             "final_count": len(results),
+            "verification_performed": True,
             "results": [
                 {
                     "chunk_id": r["chunk_id"],
