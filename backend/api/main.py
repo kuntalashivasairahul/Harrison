@@ -5,12 +5,11 @@ from pydantic import BaseModel
 from typing import Literal
 import os
 
-import rag
-
-from rag import retrieve
-from fusion import fuse_context
-from evidence import extract_evidence
-from llm import ask_llm
+from backend.retrieval import rag
+from backend.retrieval.rag import retrieve
+from backend.utils.fusion import fuse_context
+from backend.processing.evidence import extract_evidence
+from backend.llm.llm import ask_llm
 
 app = FastAPI(title="HarrisonGPT")
 

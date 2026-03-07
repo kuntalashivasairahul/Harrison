@@ -1,0 +1,8 @@
+venv/
+vectorstore/
+retrieval_logs/
+__pycache__/
+data/
+*.faiss
+*.json
+*.log

@@ -10,7 +10,7 @@ from pathlib import Path
 # --------------------------------------------------------------------
 # ENV LOADING
 # --------------------------------------------------------------------
-load_dotenv(Path(__file__).resolve().parent / ".env")
+load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 

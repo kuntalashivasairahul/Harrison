@@ -1,5 +1,5 @@
 from typing import Dict, List
-from fusion import clean_text
+from backend.utils.fusion import clean_text
 
 
 def extract_evidence(chunks: List[Dict]) -> List[str]:

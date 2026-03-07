@@ -1,14 +1,13 @@
 # backend/rag.py (v3 - Hybrid FAISS + BM25 + rerank + filtering + logging)
 import faiss
 import json
-import os
 import time
 from pathlib import Path
 from typing import Dict, List
 
-from embeddings import embed_text
+from backend.retrieval.embeddings import embed_text
 from rank_bm25 import BM25Okapi
-from rerank import rerank
+from backend.retrieval.rerank import rerank
 
 
 # Reciprocal Rank Fusion hyperparameter (standard choice ~60)
@@ -16,10 +15,14 @@ RRF_K = 60
 
 
 # Load chunks metadata
-BASE_DIR = Path(__file__).resolve().parent
-CHUNKS_PATH = BASE_DIR / "vectorstore" / "chunks.json"
-INDEX_PATH = BASE_DIR / "vectorstore" / "index.faiss"
-LOG_DIR = BASE_DIR / "retrieval_logs"
+BASE_DIR = Path(__file__).resolve().parents[2]
+
+VECTORSTORE_DIR = BASE_DIR / "artifacts" / "vectorstore"
+
+CHUNKS_PATH = VECTORSTORE_DIR / "chunks.json"
+INDEX_PATH = VECTORSTORE_DIR / "index.faiss"
+
+LOG_DIR = BASE_DIR / "artifacts" / "retrieval_logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 try:

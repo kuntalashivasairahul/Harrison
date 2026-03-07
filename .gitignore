@@ -19,3 +19,12 @@ Thumbs.db
 # IDE
 .vscode/
 .cursor/
+
+
+.venv/
+artifacts/vectorstore/
+artifacts/retrieval_logs/
+__pycache__/
+*.faiss
+*.log
+.env
