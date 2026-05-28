@@ -1,0 +1,2 @@
+# This directory holds pre-rendered thumbnail images (*.webp) for each Harrison page.
+# Files are served by FastAPI's StaticFiles mount at /pages/small/<filename>.

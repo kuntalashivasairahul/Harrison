@@ -13,6 +13,16 @@ from backend.retrieval.rerank import rerank
 # Reciprocal Rank Fusion hyperparameter (standard choice ~60)
 RRF_K = 60
 
+# Minimum Cross-Encoder score a chunk must achieve to be included in the
+# final response.  Chunks below this threshold are considered irrelevant
+# noise that would pollute the LLM context.  The Cross-Encoder used
+# (ms-marco-MiniLM-L-6-v2) produces raw logits; empirically, scores below
+# -2.0 indicate near-zero relevance to the query.
+# Tune upward (e.g. -1.0) for stricter filtering, downward (e.g. -3.0) to
+# be more permissive.  The pipeline still returns [] gracefully if ALL
+# chunks are filtered out.
+RERANK_SCORE_THRESHOLD: float = -2.0
+
 
 # Load chunks metadata
 BASE_DIR = Path(__file__).resolve().parents[2]
@@ -348,6 +358,17 @@ def retrieve(
     # 6) Cross-encoder rerank
     top_candidates = rerank(query, rerank_inputs, top_n=final_k)
 
+    # 7) Drop chunks whose Cross-Encoder score is below the relevance
+    #    threshold.  These are noisy candidates that slipped through
+    #    FAISS/BM25 but were not actually relevant to the query.
+    #    We do this AFTER rerank() so we never alter ranking math.
+    pre_filter_count = len(top_candidates)
+    top_candidates = [
+        c for c in top_candidates
+        if c.get("score") is None or float(c["score"]) >= RERANK_SCORE_THRESHOLD
+    ]
+    dropped_count = pre_filter_count - len(top_candidates)
+
     # Prepare final structure (ensuring types are JSON-serializable)
     results = []
     for c in top_candidates:
@@ -371,6 +392,9 @@ def retrieve(
             "candidate_count_after_merge": total_after_merge,
             "candidates_count": len(merged_candidates),
             "filtered_count": len(rerank_inputs),
+            "reranked_count": pre_filter_count,
+            "score_threshold": RERANK_SCORE_THRESHOLD,
+            "below_threshold_dropped": dropped_count,
             "final_count": len(results),
             "verification_performed": True,
             "results": [

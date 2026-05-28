@@ -1,8 +1,10 @@
 # backend/main.py
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
-from typing import List, Literal
+from typing import Any, Dict, List, Literal
+from pathlib import Path
 import os
 
 from backend.retrieval import rag
@@ -12,8 +14,18 @@ from backend.processing.evidence import extract_evidence, extract_sources
 from backend.llm.llm import ask_llm, REFUSAL_STR
 from backend.retrieval.rerank import top_score
 from backend.utils.scoring import calculate_confidence
+from backend.rendering.page_resolver import resolve_page_urls
 
 app = FastAPI(title="HarrisonGPT")
+
+# --------------------------------------------------------------------
+# STATIC FILES – serve pre-rendered Harrison page images
+# storage/pages/small/  →  /pages/small/<filename>
+# storage/pages/full/   →  /pages/full/<filename>
+# --------------------------------------------------------------------
+_STORAGE_DIR = Path(__file__).resolve().parents[2] / "storage" / "pages"
+_STORAGE_DIR.mkdir(parents=True, exist_ok=True)   # ensure dir exists at startup
+app.mount("/pages", StaticFiles(directory=str(_STORAGE_DIR)), name="pages")
 
 SMART_SUMMARY_K = int(os.getenv("SMART_SUMMARY_K", "48"))
 SMART_SUMMARY_FINAL_K = int(os.getenv("SMART_SUMMARY_FINAL_K", "12"))
@@ -33,17 +45,21 @@ class QueryResponse(BaseModel):
 
     Fields
     ------
-    answer     : The LLM-generated answer to the query.
-    confidence : Confidence level of the answer (e.g. "High", "Medium", "Low").
-                 Defaults to "Pending" until the confidence-scoring backend is
-                 implemented in Phase 2.
-    sources    : Ordered list of source page references supporting the answer.
-                 Defaults to an empty list until source extraction is wired up.
+    answer         : The LLM-generated answer to the query.
+    confidence     : Confidence level of the answer ("High", "Medium", or "Low").
+    sources        : Ordered list of source page references (e.g. ["p.142"]).
+    visual_context : One entry per source page, each containing the original
+                     page_label and absolute thumbnail_url / full_url for the
+                     pre-rendered page images served at /pages/*.
     """
 
     answer: str
     confidence: str = Field(default="Pending", description="Confidence level of the answer")
     sources: List[str] = Field(default_factory=list, description="Source page references")
+    visual_context: List[Dict[str, str]] = Field(
+        default_factory=list,
+        description="Image URLs for each source page (thumbnail_url, full_url)",
+    )
 
 
 # --------------------------------------------------------------------
@@ -51,7 +67,7 @@ class QueryResponse(BaseModel):
 # --------------------------------------------------------------------
 
 @app.post("/ask", response_model=QueryResponse)
-def ask_question(req: QueryRequest) -> QueryResponse:
+def ask_question(req: QueryRequest, request: Request) -> QueryResponse:
     query = req.query
     mode = req.mode
 
@@ -109,10 +125,20 @@ def ask_question(req: QueryRequest) -> QueryResponse:
         was_verified=was_verified,
     )
 
+    # 9️⃣ Resolve source page labels to image URLs.
+    #    base_url is derived from the live Request so this works on any
+    #    host/port without hardcoding (localhost, staging, or production).
+    base_url: str = str(request.base_url).rstrip("/")
+    visual_context: List[Dict[str, str]] = resolve_page_urls(
+        sources=sources,
+        base_url=base_url,
+    )
+
     return QueryResponse(
         answer=answer,
         confidence=confidence,
         sources=sources,
+        visual_context=visual_context,
     )
 
 

@@ -1,0 +1,2 @@
+# This directory holds pre-rendered full-resolution images (*.png) for each Harrison page.
+# Files are served by FastAPI's StaticFiles mount at /pages/full/<filename>.

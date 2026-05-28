@@ -188,29 +188,29 @@ STRICT RULES:
 2. Do NOT use outside knowledge.
 3. Preserve Harrison-level accuracy and terminology.
 4. Remove low-yield narrative while preserving exam-relevant information.
-5. If a section lacks evidence, write:
-   "Information not present in the retrieved Harrison excerpt."
+5. Only generate a section or heading if the provided context contains
+   information for it. If evidence for a section is absent, OMIT that
+   section entirely — do NOT write empty headings, do NOT write
+   "Information not present", and do NOT write placeholder text.
 6. First line must be exactly:
    "Topic received — generating Harrison Smart Summary."
 """
 
 
 def _enforce_smart_summary_shape(content: str) -> str:
+    """Ensure the acknowledgement line is always the first line.
+
+    Sections are now generated dynamically — we no longer pad missing
+    sections with stub text.  The only invariant we enforce here is that
+    the model's acknowledgement line appears at the top so callers can
+    detect a valid smart_summary response reliably.
+    """
     text = (content or "").strip()
     if not text:
         return text
 
     if SMART_SUMMARY_ACK not in text.splitlines()[0]:
         text = f"{SMART_SUMMARY_ACK}\n\n{text}"
-
-    missing_sections = []
-    for header in SMART_SUMMARY_SECTIONS:
-        if re.search(rf"^{re.escape(header)}$", text, flags=re.MULTILINE) is None:
-            missing_sections.append(header)
-
-    if missing_sections:
-        additions = "\n\n".join(f"{header}\n{MISSING_INFO_STR}" for header in missing_sections)
-        text = f"{text}\n\n{additions}".strip()
 
     return text
 
