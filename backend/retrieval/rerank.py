@@ -43,3 +43,27 @@ def rerank(query: str, candidates: List[Dict], top_n: int = 6) -> List[Dict]:
     # sort by score desc
     candidates.sort(key=lambda x: x["score"], reverse=True)
     return candidates[:top_n]
+
+
+def top_score(ranked_chunks: List[Dict]) -> float:
+    """
+    Return the highest Cross-Encoder ``score`` from an already-reranked chunk
+    list (i.e. the output of ``rerank()``).
+
+    The list is expected to be sorted descending by score (as ``rerank()``
+    guarantees), so we just read index 0.  Falls back to iterating the whole
+    list in case the caller passes an unsorted slice, and returns 0.0 when the
+    list is empty or scores are absent.
+
+    This is intentionally a **read-only** helper — it does not re-sort or
+    mutate the input in any way.
+    """
+    if not ranked_chunks:
+        return 0.0
+    # Fast path: list is already sorted descending by rerank()
+    best = ranked_chunks[0].get("score")
+    if best is not None:
+        return float(best)
+    # Fallback: iterate (should not normally happen)
+    scores = [c.get("score") for c in ranked_chunks if c.get("score") is not None]
+    return float(max(scores)) if scores else 0.0

@@ -1,0 +1,34 @@
+[
+  {
+    "query": "Pathophysiology of myocardial infarction",
+    "mode": "qa"
+  },
+  {
+    "query": "Complications of myocardial infarction",
+    "mode": "qa"
+  },
+  {
+    "query": "Causes of type 2 myocardial infarction",
+    "mode": "qa"
+  },
+  {
+    "query": "Role of troponin in myocardial infarction diagnosis",
+    "mode": "qa"
+  },
+  {
+    "query": "Mechanism of plaque rupture in coronary artery disease",
+    "mode": "qa"
+  },
+  {
+    "query": "Risk factors for coronary artery disease",
+    "mode": "qa"
+  },
+  {
+    "query": "Difference between STEMI and NSTEMI",
+    "mode": "qa"
+  },
+  {
+    "query": "Management of acute myocardial infarction",
+    "mode": "qa"
+  }
+]

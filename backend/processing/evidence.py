@@ -44,3 +44,38 @@ def extract_evidence(chunks: List[Dict]) -> List[str]:
         evidence.append(f"EVIDENCE: {statement} [p:{page}]")
 
     return evidence
+
+
+def extract_sources(chunks: List[Dict]) -> List[str]:
+    """
+    Return a de-duplicated, sorted list of human-readable page references from
+    the retrieved chunks.
+
+    Each chunk is expected to carry a ``"page"`` key (int or str).  Pages that
+    are ``None`` or empty are silently skipped.
+
+    Returns
+    -------
+    List[str]
+        Sorted list of unique page labels, e.g. ``["p.142", "p.143", "p.512"]``.
+        Returns an empty list when no valid pages are found.
+    """
+    if not chunks:
+        return []
+
+    seen: set = set()
+    for ch in chunks:
+        if not isinstance(ch, dict):
+            continue
+        page = ch.get("page")
+        if page is None:
+            continue
+        seen.add(page)
+
+    # Sort numerically when pages are ints/floats, lexicographically otherwise
+    try:
+        ordered = sorted(seen, key=lambda p: int(p))
+    except (TypeError, ValueError):
+        ordered = sorted(seen, key=str)
+
+    return [f"p.{p}" for p in ordered]
