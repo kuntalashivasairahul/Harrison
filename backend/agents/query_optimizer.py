@@ -1,0 +1,306 @@
+# backend/agents/query_optimizer.py
+"""
+QueryOptimizer Agent — Pre-Retrieval Stage
+==========================================
+Intercepts a raw user query and rewrites it into a structured search plan
+optimised for FAISS semantic search over Harrison's Principles of Internal
+Medicine.
+
+Responsibilities
+----------------
+- Expand medical acronyms to full clinical terms.
+- Add diagnostic/therapeutic framing to under-specified queries.
+- Detect whether the query is medical in nature.
+- Return a deterministic, machine-readable dict on every call.
+
+Guarantees (CODING_RULES.md §1, §2, §3)
+-----------------------------------------
+- Pure fallback: if the LLM is unavailable or returns unparseable output,
+  ``optimize_query`` always returns a safe, well-structured dict built from
+  the original raw query.  The pipeline never crashes.
+- No medical claims are invented — the agent only rewrites the *query*, not
+  the *answer*.
+- No imports from ``retrieval/``, ``llm/``, ``api/``, or ``rendering/``.
+  This module depends only on ``groq``, the standard library, and
+  ``backend/.env``.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import re
+from pathlib import Path
+from typing import TypedDict
+
+from dotenv import load_dotenv
+from groq import Groq
+
+# ---------------------------------------------------------------------------
+# Environment & client setup
+# ---------------------------------------------------------------------------
+
+load_dotenv(Path(__file__).resolve().parents[1] / ".env")
+
+_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+
+# Fast, low-latency model — 8 k context is ample for query expansion.
+# llama-3.1-8b-instant is Groq's current recommended low-latency 8B model.
+_OPTIMIZER_MODEL = "llama-3.1-8b-instant"
+
+# Keep expansion tokens tight — we only need a small JSON object.
+_MAX_TOKENS = 256
+
+# Single-attempt timeout guard: Groq client raises on its own timeout;
+# we catch broadly so the fallback path is always reached.
+_TEMPERATURE = 0.0  # Deterministic — query rewriting must be stable.
+
+log = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Output schema
+# ---------------------------------------------------------------------------
+
+
+class OptimizedQuery(TypedDict):
+    """
+    Structured output of the QueryOptimizer agent.
+
+    Fields
+    ------
+    is_medical_query : bool
+        True when the query is clearly within the medical/clinical domain.
+        False for off-topic or administrative queries.
+    expanded_query : str
+        A rewritten, FAISS-ready query string.  Acronyms are expanded,
+        clinical context (e.g. "diagnosis and treatment") is added when
+        absent, and ambiguous terms are disambiguated.
+    focus : str
+        A concise label describing the primary clinical intent of the query.
+        Examples: "diagnosis", "pathophysiology", "management",
+        "pharmacology", "epidemiology", "prognosis".
+    original_query : str
+        The unmodified raw query, preserved for logging and fallback use.
+    optimizer_used : bool
+        True when the LLM expansion succeeded; False when the fallback
+        (rule-based) path was taken.
+    """
+
+    is_medical_query: bool
+    expanded_query: str
+    focus: str
+    original_query: str
+    optimizer_used: bool
+
+
+# ---------------------------------------------------------------------------
+# Prompt
+# ---------------------------------------------------------------------------
+
+_SYSTEM_PROMPT = """\
+You are a clinical query expansion agent for HarrisonGPT, a medical RAG system \
+built on Harrison's Principles of Internal Medicine.
+
+Your job is to rewrite a raw user query into a precise, clinically-grounded \
+search query optimised for semantic search over a medical textbook.
+
+Rules:
+1. Expand ALL medical acronyms to their full clinical terms.
+   Examples: "MI" → "myocardial infarction", "HF" → "heart failure",
+   "T2DM" → "type 2 diabetes mellitus", "ARDS" → "acute respiratory \
+distress syndrome".
+2. If the query lacks clinical framing, add it.
+   Examples: "chest pain" → "chest pain differential diagnosis and evaluation",
+   "hypertension" → "hypertension pathophysiology diagnosis and management".
+3. Identify the primary clinical focus from this list ONLY:
+   diagnosis | pathophysiology | management | pharmacology | epidemiology | \
+prognosis | definition | investigation | complication | other
+4. Determine if the query is medical. Non-medical queries (e.g. "what is the \
+capital of France") should have is_medical_query: false and an unchanged \
+expanded_query.
+5. Keep the expanded_query under 120 characters.
+
+You MUST respond with ONLY a valid JSON object. No prose, no markdown, no \
+code fences. The JSON must have exactly these four keys:
+{
+  "is_medical_query": <bool>,
+  "expanded_query": "<string>",
+  "focus": "<string>"
+}
+"""
+
+_USER_TEMPLATE = "Raw query: {raw_query}"
+
+# ---------------------------------------------------------------------------
+# JSON extraction helper
+# ---------------------------------------------------------------------------
+
+_JSON_BLOCK_RE = re.compile(r"\{.*?\}", re.DOTALL)
+
+
+def _extract_json(text: str) -> dict | None:
+    """
+    Attempt to parse the first JSON object found in ``text``.
+
+    The LLM occasionally wraps output in markdown fences or adds preamble
+    text despite explicit instructions.  This helper strips that noise.
+    """
+    text = text.strip()
+
+    # Fast path: the whole string is valid JSON.
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # Slow path: find the first {...} block.
+    match = _JSON_BLOCK_RE.search(text)
+    if match:
+        try:
+            return json.loads(match.group())
+        except json.JSONDecodeError:
+            pass
+
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Schema validator
+# ---------------------------------------------------------------------------
+
+def _validate_payload(payload: dict, raw_query: str) -> OptimizedQuery | None:
+    """
+    Validate that ``payload`` contains the expected keys with correct types.
+
+    Returns None if validation fails so the caller can invoke the fallback.
+    """
+    is_medical = payload.get("is_medical_query")
+    expanded = payload.get("expanded_query")
+    focus = payload.get("focus")
+
+    if not isinstance(is_medical, bool):
+        log.debug("QueryOptimizer: is_medical_query missing or not bool.")
+        return None
+    if not isinstance(expanded, str) or not expanded.strip():
+        log.debug("QueryOptimizer: expanded_query missing or empty.")
+        return None
+    if not isinstance(focus, str) or not focus.strip():
+        log.debug("QueryOptimizer: focus missing or empty.")
+        return None
+
+    return OptimizedQuery(
+        is_medical_query=is_medical,
+        expanded_query=expanded.strip(),
+        focus=focus.strip().lower(),
+        original_query=raw_query,
+        optimizer_used=True,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Fallback builder
+# ---------------------------------------------------------------------------
+
+def _build_fallback(raw_query: str) -> OptimizedQuery:
+    """
+    Construct a safe, pass-through OptimizedQuery from the original query.
+
+    Called whenever the LLM path fails for any reason.  The pipeline receives
+    a well-typed dict and continues without interruption.
+    """
+    return OptimizedQuery(
+        is_medical_query=True,       # Conservative: assume medical in medical app.
+        expanded_query=raw_query,    # Pass-through: no expansion attempted.
+        focus="other",               # Unknown focus — retrieval handles it.
+        original_query=raw_query,
+        optimizer_used=False,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+def optimize_query(raw_query: str) -> OptimizedQuery:
+    """
+    Expand and disambiguate a raw user query for FAISS semantic search.
+
+    This is the single public entry-point for the QueryOptimizer agent.
+    It is safe to call from any context — it never raises.
+
+    Parameters
+    ----------
+    raw_query : str
+        The unprocessed string exactly as typed by the user.
+
+    Returns
+    -------
+    OptimizedQuery
+        A TypedDict with the fields:
+        - ``is_medical_query`` (bool)
+        - ``expanded_query`` (str)  — FAISS-ready search string
+        - ``focus`` (str)           — clinical intent label
+        - ``original_query`` (str)  — unmodified input
+        - ``optimizer_used`` (bool) — True if LLM expansion succeeded
+
+    Behaviour on failure
+    --------------------
+    If the Groq call raises, times out, or returns unparseable output,
+    the function logs the error at WARNING level and returns the original
+    query verbatim via ``_build_fallback()``.  The pipeline is never
+    interrupted.
+    """
+    raw_query = (raw_query or "").strip()
+    if not raw_query:
+        log.warning("QueryOptimizer: received empty query — returning fallback.")
+        return _build_fallback("")
+
+    try:
+        response = _client.chat.completions.create(
+            model=_OPTIMIZER_MODEL,
+            messages=[
+                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "user", "content": _USER_TEMPLATE.format(raw_query=raw_query)},
+            ],
+            temperature=_TEMPERATURE,
+            max_tokens=_MAX_TOKENS,
+        )
+
+        raw_content: str = response.choices[0].message.content or ""
+        payload = _extract_json(raw_content)
+
+        if payload is None:
+            log.warning(
+                "QueryOptimizer: LLM returned unparseable content: %r — "
+                "falling back to original query.",
+                raw_content[:120],
+            )
+            return _build_fallback(raw_query)
+
+        validated = _validate_payload(payload, raw_query)
+        if validated is None:
+            log.warning(
+                "QueryOptimizer: LLM payload failed schema validation: %r — "
+                "falling back to original query.",
+                payload,
+            )
+            return _build_fallback(raw_query)
+
+        log.debug(
+            "QueryOptimizer: '%s' → '%s' (focus=%s, medical=%s)",
+            raw_query,
+            validated["expanded_query"],
+            validated["focus"],
+            validated["is_medical_query"],
+        )
+        return validated
+
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "QueryOptimizer: LLM call failed (%s: %s) — falling back to "
+            "original query.",
+            type(exc).__name__,
+            exc,
+        )
+        return _build_fallback(raw_query)
