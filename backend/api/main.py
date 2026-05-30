@@ -15,6 +15,7 @@ from backend.llm.llm import ask_llm, REFUSAL_STR
 from backend.retrieval.rerank import top_score
 from backend.utils.scoring import calculate_confidence
 from backend.rendering.page_resolver import resolve_page_urls
+from backend.agents.query_optimizer import optimize_query
 
 app = FastAPI(title="HarrisonGPT")
 
@@ -68,19 +69,51 @@ class QueryResponse(BaseModel):
 
 @app.post("/ask", response_model=QueryResponse)
 def ask_question(req: QueryRequest, request: Request) -> QueryResponse:
-    query = req.query
+    raw_query = req.query
     mode = req.mode
+
+    # ----------------------------------------------------------------
+    # 0️⃣  QueryOptimizer — pre-retrieval gatekeeper & context enhancer
+    # ----------------------------------------------------------------
+    # The agent runs a fast LLM call (llama-3.1-8b-instant) to:
+    #   a) Detect whether the query is medical in nature.
+    #   b) Expand acronyms and add clinical framing.
+    # If the LLM is unavailable, optimize_query() falls back to the
+    # original query transparently (CODING_RULES.md §3.2).
+    optimized = optimize_query(raw_query)
+
+    # ── Gatekeeper: non-medical queries short-circuit immediately ──
+    # This bypasses all retrieval and LLM generation, saving compute
+    # and keeping Harrison-specific context intact.
+    if not optimized["is_medical_query"]:
+        return QueryResponse(
+            answer=(
+                "HarrisonGPT is a medical reference assistant grounded exclusively "
+                "in Harrison's Principles of Internal Medicine. I'm only able to "
+                "answer clinical questions about diseases, diagnosis, treatment, and "
+                "pharmacology. Please rephrase your query as a medical question."
+            ),
+            confidence="High",   # Highly confident this is out of scope.
+            sources=[],
+            visual_context=[],
+        )
+
+    # ── Enhancement: use the expanded query for retrieval & generation ──
+    # The display question shown to the LLM remains the raw user input so
+    # the answer reads naturally; the expanded_query drives FAISS/BM25
+    # for higher semantic recall.
+    search_query: str = optimized["expanded_query"] or raw_query
 
     # 1️⃣ Retrieve
     if mode == "smart_summary":
         retrieved_chunks = retrieve(
-            query,
+            search_query,
             k=SMART_SUMMARY_K,
             final_k=SMART_SUMMARY_FINAL_K,
             rerank_pool=SMART_SUMMARY_RERANK_POOL,
         )
     else:
-        retrieved_chunks = retrieve(query)
+        retrieved_chunks = retrieve(search_query)
 
     # 2️⃣ Fuse context
     fused_context = fuse_context(retrieved_chunks)
@@ -89,9 +122,11 @@ def ask_question(req: QueryRequest, request: Request) -> QueryResponse:
     evidence = extract_evidence(retrieved_chunks)
 
     # 4️⃣ Ask LLM
+    #    question= uses raw_query so the answer is phrased naturally for
+    #    the user; the enriched context already reflects search_query.
     answer = ask_llm(
         fused_context=fused_context,
-        question=query,
+        question=raw_query,
         mode=mode,
         evidence=evidence,
     )
