@@ -113,6 +113,18 @@ def ask_question(req: QueryRequest, request: Request) -> QueryResponse:
     # for higher semantic recall.
     search_query: str = optimized["expanded_query"] or raw_query
 
+    # ── Adaptive Retrieval Depth ──────────────────────────────────────
+    # The QueryOptimizer classifies each query as "simple" (single-fact
+    # lookup) or "complex" (multi-part: pathophysiology + management,
+    # diagnostic criteria, scoring systems, etc.).
+    # "simple" → final_k=5  : fast, tight context, lower Groq token cost.
+    # "complex" → final_k=12 : wider context window prevents fragmentation
+    #                          of multi-section clinical protocols.
+    # The fallback value in the optimizer is always "complex", so missing
+    # or failed LLM calls conservatively maximise recall.
+    _complexity: str     = optimized.get("complexity", "complex")
+    dynamic_final_k: int = 5 if _complexity == "simple" else 12
+
     # ----------------------------------------------------------------
     # 1️⃣  Semantic Cache — check before any retrieval or LLM work
     # ----------------------------------------------------------------
@@ -133,16 +145,16 @@ def ask_question(req: QueryRequest, request: Request) -> QueryResponse:
 
     # ── Cache MISS: run the full pipeline ──
 
-    # 2️⃣ Retrieve
+    # 2️⃣ Retrieve (final_k scaled by query complexity)
     if mode == "smart_summary":
         retrieved_chunks = retrieve(
             search_query,
             k=SMART_SUMMARY_K,
-            final_k=SMART_SUMMARY_FINAL_K,
+            final_k=dynamic_final_k,
             rerank_pool=SMART_SUMMARY_RERANK_POOL,
         )
     else:
-        retrieved_chunks = retrieve(search_query)
+        retrieved_chunks = retrieve(search_query, final_k=dynamic_final_k)
 
     # 2.5️⃣ ContextRouter — deduplicate & chronological sort
     # Drops near-identical chunks (>90% overlap) and re-orders survivors

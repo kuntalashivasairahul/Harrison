@@ -50,8 +50,8 @@ from groq import Groq
 _ROOT = Path(__file__).resolve().parents[1]
 load_dotenv(_ROOT / "backend" / ".env")
 
-API_BASE_URL  = os.getenv("HARRISONAI_API_URL", "http://127.0.0.1:8000")
-ASK_ENDPOINT  = f"{API_BASE_URL}/ask"
+API_BASE_URL   = os.getenv("HARRISONAI_API_URL", "http://127.0.0.1:8000")
+ASK_ENDPOINT   = f"{API_BASE_URL}/ask"
 CACHE_ENDPOINT = f"{API_BASE_URL}/admin/cache"
 
 # Judge model — must be a large, high-reasoning model (CODING_RULES.md §4).
@@ -63,6 +63,97 @@ PASS_THRESHOLD: float = 3.0
 
 # Request timeout for the /ask endpoint (RAG pipeline can take ~15s).
 ASK_TIMEOUT_S: int = 90
+
+# ---------------------------------------------------------------------------
+# Retry / back-off configuration
+# ---------------------------------------------------------------------------
+# Both the /ask pipeline call and the Groq judge call can hit rate limits
+# (HTTP 429).  The wrapper below retries with exponential back-off + jitter
+# and honours the Retry-After header when Groq includes it.
+
+RETRY_MAX_ATTEMPTS: int   = 5       # total attempts (1 original + 4 retries)
+RETRY_BASE_DELAY_S: float = 4.0    # seconds before first retry
+RETRY_MAX_DELAY_S:  float = 120.0  # cap per sleep (2 minutes)
+RETRY_BACKOFF_FACTOR: float = 2.0  # multiply delay by this after each failure
+
+import math
+import random
+
+
+def _parse_retry_after(exc: Exception) -> Optional[float]:
+    """
+    Try to extract a Retry-After wait time (seconds) from a Groq or urllib
+    exception message.  Groq embeds it in the JSON error body as either:
+      "Please try again in 20m50.208s"
+      "Please try again in 45.3s"
+    Returns None if no parseable value is found.
+    """
+    import re
+    text = str(exc)
+    # Match "Xm Y.Zs" or "Y.Zs" patterns
+    m = re.search(r'try again in (?:(\d+)m)?(\d+(?:\.\d+)?)s', text)
+    if m:
+        minutes = int(m.group(1) or 0)
+        seconds = float(m.group(2))
+        return minutes * 60 + seconds
+    return None
+
+
+def _with_retry(fn, *args, label: str = "call", **kwargs):
+    """
+    Call ``fn(*args, **kwargs)`` up to RETRY_MAX_ATTEMPTS times.
+
+    On a 429 / RateLimitError:
+      1. Parse the Retry-After duration from the error message.
+      2. If found, sleep exactly that long (+ 2s safety margin).
+      3. If not found, use exponential back-off with ±10% jitter.
+
+    Any non-rate-limit exception propagates immediately (fail fast).
+    Returns the result of the first successful call.
+    Raises the last exception if all attempts are exhausted.
+    """
+    delay = RETRY_BASE_DELAY_S
+    last_exc: Exception = RuntimeError("No attempts made")
+
+    for attempt in range(1, RETRY_MAX_ATTEMPTS + 1):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as exc:
+            text = str(exc).lower()
+            is_rate_limit = "429" in text or "rate_limit" in text or "rate limit" in text
+
+            if not is_rate_limit:
+                raise  # propagate non-rate-limit errors immediately
+
+            last_exc = exc
+            retry_after = _parse_retry_after(exc)
+
+            if attempt == RETRY_MAX_ATTEMPTS:
+                break  # exhausted — fall through to raise
+
+            if retry_after is not None:
+                wait = retry_after + 2.0  # small safety margin
+                print(
+                    f"\n  {YELLOW}⏳ Rate limit hit on {label} "
+                    f"(attempt {attempt}/{RETRY_MAX_ATTEMPTS}). "
+                    f"Groq says wait {retry_after:.0f}s — sleeping {wait:.0f}s…{RESET}",
+                    flush=True,
+                )
+            else:
+                # Exponential back-off with ±10% jitter
+                jitter = random.uniform(-0.1 * delay, 0.1 * delay)
+                wait   = min(delay + jitter, RETRY_MAX_DELAY_S)
+                print(
+                    f"\n  {YELLOW}⏳ Rate limit hit on {label} "
+                    f"(attempt {attempt}/{RETRY_MAX_ATTEMPTS}). "
+                    f"Back-off {wait:.1f}s…{RESET}",
+                    flush=True,
+                )
+                delay = min(delay * RETRY_BACKOFF_FACTOR, RETRY_MAX_DELAY_S)
+
+            time.sleep(wait)
+
+    raise last_exc
 
 # ---------------------------------------------------------------------------
 # Golden Dataset
@@ -229,8 +320,9 @@ def judge_answer(query: str, expected_focus: str, answer: str) -> dict:
     """
     Ask the 70B judge model to score the generated answer.
 
-    Returns a dict with keys ``score`` (int) and ``reasoning`` (str).
-    Falls back to score=0 with an error message if the judge call fails.
+    Retries automatically on 429 / rate-limit errors using exponential
+    back-off (see _with_retry).  Returns a dict with keys ``score`` (int)
+    and ``reasoning`` (str).  Falls back to score=0 on permanent failure.
     """
     client = _get_groq()
     user_msg = JUDGE_USER_TEMPLATE.format(
@@ -238,8 +330,9 @@ def judge_answer(query: str, expected_focus: str, answer: str) -> dict:
         expected_focus=expected_focus,
         answer=answer,
     )
-    try:
-        resp = client.chat.completions.create(
+
+    def _call_judge():
+        return client.chat.completions.create(
             model=JUDGE_MODEL,
             messages=[
                 {"role": "system", "content": JUDGE_SYSTEM},
@@ -248,7 +341,10 @@ def judge_answer(query: str, expected_focus: str, answer: str) -> dict:
             temperature=0.0,   # deterministic grading
             max_tokens=256,
         )
-        raw = (resp.choices[0].message.content or "").strip()
+
+    try:
+        resp = _with_retry(_call_judge, label=f"judge ({JUDGE_MODEL})")
+        raw  = (resp.choices[0].message.content or "").strip()
 
         # Strip accidental markdown fences
         if raw.startswith("```"):
@@ -257,7 +353,7 @@ def judge_answer(query: str, expected_focus: str, answer: str) -> dict:
                 raw = raw[4:].strip()
 
         payload = json.loads(raw)
-        score = int(payload.get("score", 0))
+        score   = int(payload.get("score", 0))
         if not 1 <= score <= 5:
             raise ValueError(f"score out of range: {score}")
         return {"score": score, "reasoning": str(payload.get("reasoning", ""))}
@@ -309,11 +405,16 @@ def run_evaluation() -> list[EvalResult]:
         print(f"{BOLD}{WHITE}[{idx}/{len(GOLDEN_DATASET)}] {query}{RESET}")
         print(f"{DIM}  Mode: {mode}{RESET}\n")
 
-        # ── Step 1: Call /ask ─────────────────────────────────────────
+        # ── Step 1: Call /ask (with retry on 429) ───────────────────────
         answer, confidence, sources, latency_s, error = "", "—", [], 0.0, None
         try:
             print(f"  {DIM}→ Calling /ask …{RESET}", end="", flush=True)
-            body, latency_s = _http_post(ASK_ENDPOINT, {"query": query, "mode": mode})
+            body, latency_s = _with_retry(
+                _http_post,
+                ASK_ENDPOINT,
+                {"query": query, "mode": mode},
+                label="/ask",
+            )
             answer     = body.get("answer", "")
             confidence = body.get("confidence", "—")
             sources    = body.get("sources", [])

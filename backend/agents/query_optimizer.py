@@ -80,6 +80,15 @@ class OptimizedQuery(TypedDict):
         A concise label describing the primary clinical intent of the query.
         Examples: "diagnosis", "pathophysiology", "management",
         "pharmacology", "epidemiology", "prognosis".
+    complexity : str
+        Query complexity classification — one of:
+        ``"simple"``  — single-fact lookup, isolated definition, or specific
+                        drug dose.  Example: "What is the half-life of warfarin?"
+        ``"complex"`` — multi-part question, combined pathophysiology +
+                        management, or questions requiring diagnostic criteria
+                        and scoring systems.
+                        Example: "Pathophysiology and management of DKA"
+        Used by the pipeline to set adaptive retrieval depth (final_k).
     original_query : str
         The unmodified raw query, preserved for logging and fallback use.
     optimizer_used : bool
@@ -88,10 +97,11 @@ class OptimizedQuery(TypedDict):
     """
 
     is_medical_query: bool
-    expanded_query: str
-    focus: str
-    original_query: str
-    optimizer_used: bool
+    expanded_query:   str
+    focus:            str
+    complexity:       str   # "simple" | "complex"
+    original_query:   str
+    optimizer_used:   bool
 
 
 # ---------------------------------------------------------------------------
@@ -120,13 +130,27 @@ prognosis | definition | investigation | complication | other
 capital of France") should have is_medical_query: false and an unchanged \
 expanded_query.
 5. Keep the expanded_query under 120 characters.
+6. Classify the query complexity:
+   "simple"  — single-concept lookup: one isolated fact, a drug dose,
+               a specific lab value, or a brief definition.
+               Examples: "What is the normal INR range?",
+                         "Definition of bradycardia",
+                         "Dose of amoxicillin for strep throat".
+   "complex" — multi-part or multi-domain question: combines pathophysiology
+               WITH management, requires diagnostic criteria AND scoring
+               systems, or asks about complications AND treatment.
+               Examples: "Pathophysiology and management of DKA",
+                         "Diagnostic criteria and treatment of CAP",
+                         "Mechanism and complications of acute pancreatitis".
+   When in doubt, classify as "complex" to maximise retrieval depth.
 
 You MUST respond with ONLY a valid JSON object. No prose, no markdown, no \
-code fences. The JSON must have exactly these four keys:
+code fences. The JSON must have exactly these five keys:
 {
   "is_medical_query": <bool>,
   "expanded_query": "<string>",
-  "focus": "<string>"
+  "focus": "<string>",
+  "complexity": "simple" | "complex"
 }
 """
 
@@ -175,9 +199,10 @@ def _validate_payload(payload: dict, raw_query: str) -> OptimizedQuery | None:
 
     Returns None if validation fails so the caller can invoke the fallback.
     """
-    is_medical = payload.get("is_medical_query")
-    expanded = payload.get("expanded_query")
-    focus = payload.get("focus")
+    is_medical  = payload.get("is_medical_query")
+    expanded    = payload.get("expanded_query")
+    focus       = payload.get("focus")
+    complexity  = payload.get("complexity", "complex")  # default to complex if absent
 
     if not isinstance(is_medical, bool):
         log.debug("QueryOptimizer: is_medical_query missing or not bool.")
@@ -188,11 +213,21 @@ def _validate_payload(payload: dict, raw_query: str) -> OptimizedQuery | None:
     if not isinstance(focus, str) or not focus.strip():
         log.debug("QueryOptimizer: focus missing or empty.")
         return None
+    # Normalise complexity — any unrecognised value defaults to 'complex' for safety.
+    if not isinstance(complexity, str) or complexity.strip().lower() not in ("simple", "complex"):
+        log.debug(
+            "QueryOptimizer: complexity %r not recognised — defaulting to 'complex'.",
+            complexity,
+        )
+        complexity = "complex"
+    else:
+        complexity = complexity.strip().lower()
 
     return OptimizedQuery(
         is_medical_query=is_medical,
         expanded_query=expanded.strip(),
         focus=focus.strip().lower(),
+        complexity=complexity,
         original_query=raw_query,
         optimizer_used=True,
     )
@@ -208,11 +243,17 @@ def _build_fallback(raw_query: str) -> OptimizedQuery:
 
     Called whenever the LLM path fails for any reason.  The pipeline receives
     a well-typed dict and continues without interruption.
+
+    ``complexity`` defaults to ``"complex"`` so that the retrieval layer always
+    fetches the maximum number of chunks when the optimizer is unavailable —
+    maximising recall at the cost of slightly higher latency.  This is the
+    conservative, safe choice.
     """
     return OptimizedQuery(
         is_medical_query=True,       # Conservative: assume medical in medical app.
         expanded_query=raw_query,    # Pass-through: no expansion attempted.
         focus="other",               # Unknown focus — retrieval handles it.
+        complexity="complex",        # Max recall when LLM is unavailable.
         original_query=raw_query,
         optimizer_used=False,
     )
@@ -288,10 +329,11 @@ def optimize_query(raw_query: str) -> OptimizedQuery:
             return _build_fallback(raw_query)
 
         log.debug(
-            "QueryOptimizer: '%s' → '%s' (focus=%s, medical=%s)",
+            "QueryOptimizer: '%s' → '%s' (focus=%s, complexity=%s, medical=%s)",
             raw_query,
             validated["expanded_query"],
             validated["focus"],
+            validated["complexity"],
             validated["is_medical_query"],
         )
         return validated
