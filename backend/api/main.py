@@ -16,6 +16,8 @@ from backend.retrieval.rerank import top_score
 from backend.utils.scoring import calculate_confidence
 from backend.rendering.page_resolver import resolve_page_urls
 from backend.agents.query_optimizer import optimize_query
+from backend.agents.semantic_cache import SemanticCache
+from backend.retrieval.embeddings import embed_text
 
 app = FastAPI(title="HarrisonGPT")
 
@@ -31,6 +33,12 @@ app.mount("/pages", StaticFiles(directory=str(_STORAGE_DIR)), name="pages")
 SMART_SUMMARY_K = int(os.getenv("SMART_SUMMARY_K", "48"))
 SMART_SUMMARY_FINAL_K = int(os.getenv("SMART_SUMMARY_FINAL_K", "12"))
 SMART_SUMMARY_RERANK_POOL = int(os.getenv("SMART_SUMMARY_RERANK_POOL", "16"))
+
+# --------------------------------------------------------------------
+# SEMANTIC CACHE — global singleton, loaded once at startup from disk.
+# Provides sub-100ms responses for repeated or near-identical queries.
+# --------------------------------------------------------------------
+_cache = SemanticCache()
 
 # --------------------------------------------------------------------
 # REQUEST / RESPONSE SCHEMAS
@@ -104,7 +112,27 @@ def ask_question(req: QueryRequest, request: Request) -> QueryResponse:
     # for higher semantic recall.
     search_query: str = optimized["expanded_query"] or raw_query
 
-    # 1️⃣ Retrieve
+    # ----------------------------------------------------------------
+    # 1️⃣  Semantic Cache — check before any retrieval or LLM work
+    # ----------------------------------------------------------------
+    # embed_text() reuses the already-loaded MiniLM model — no extra
+    # memory overhead.  The (1, 384) array is flattened to a plain list
+    # for JSON-serialisable storage.
+    query_embedding: List[float] = embed_text(search_query).flatten().tolist()
+
+    cached = _cache.check_cache(query_embedding)
+    if cached is not None:
+        # ── Cache HIT: return instantly, zero FAISS/Groq cost ──
+        return QueryResponse(
+            answer=cached["answer"],
+            confidence=cached["confidence"],
+            sources=cached["sources"],
+            visual_context=cached["visual_context"],
+        )
+
+    # ── Cache MISS: run the full pipeline ──
+
+    # 2️⃣ Retrieve
     if mode == "smart_summary":
         retrieved_chunks = retrieve(
             search_query,
@@ -115,13 +143,13 @@ def ask_question(req: QueryRequest, request: Request) -> QueryResponse:
     else:
         retrieved_chunks = retrieve(search_query)
 
-    # 2️⃣ Fuse context
+    # 3️⃣ Fuse context
     fused_context = fuse_context(retrieved_chunks)
 
-    # 3️⃣ Extract structured evidence statements
+    # 4️⃣ Extract structured evidence statements
     evidence = extract_evidence(retrieved_chunks)
 
-    # 4️⃣ Ask LLM
+    # 5️⃣ Ask LLM
     #    question= uses raw_query so the answer is phrased naturally for
     #    the user; the enriched context already reflects search_query.
     answer = ask_llm(
@@ -135,15 +163,15 @@ def ask_question(req: QueryRequest, request: Request) -> QueryResponse:
     # Phase 3 – populate confidence and sources from scoring pipeline.
     # ----------------------------------------------------------------
 
-    # 5️⃣ Extract the top Cross-Encoder score for confidence scoring.
+    # 6️⃣ Extract the top Cross-Encoder score for confidence scoring.
     #    Returns 0.0 safely when retrieved_chunks is empty.
     best_score: float = top_score(retrieved_chunks)
 
-    # 6️⃣ Extract unique, sorted page references for the sources field.
+    # 7️⃣ Extract unique, sorted page references for the sources field.
     #    Returns [] safely when retrieved_chunks is empty.
     sources: List[str] = extract_sources(retrieved_chunks)
 
-    # 7️⃣ Determine whether verification actually ran.
+    # 8️⃣ Determine whether verification actually ran.
     #    verify_answer() is called unconditionally inside ask_llm() whenever
     #    the LLM returns a real response.  We consider the answer "verified"
     #    when ask_llm() did not return a known refusal/error sentinel.
@@ -153,20 +181,31 @@ def ask_question(req: QueryRequest, request: Request) -> QueryResponse:
         and not answer.startswith("LLM call failed:")
     )
 
-    # 8️⃣ Calculate the unified confidence label.
+    # 9️⃣ Calculate the unified confidence label.
     confidence: str = calculate_confidence(
         top_reranker_score=best_score,
         evidence_count=len(evidence),
         was_verified=was_verified,
     )
 
-    # 9️⃣ Resolve source page labels to image URLs.
+    # 🔟 Resolve source page labels to image URLs.
     #    base_url is derived from the live Request so this works on any
     #    host/port without hardcoding (localhost, staging, or production).
     base_url: str = str(request.base_url).rstrip("/")
     visual_context: List[Dict[str, str]] = resolve_page_urls(
         sources=sources,
         base_url=base_url,
+    )
+
+    # ── Persist to semantic cache so future similar queries are instant ──
+    _cache.save_to_cache(
+        query_embedding=query_embedding,
+        response_data={
+            "answer":         answer,
+            "confidence":     confidence,
+            "sources":        sources,
+            "visual_context": visual_context,
+        },
     )
 
     return QueryResponse(
