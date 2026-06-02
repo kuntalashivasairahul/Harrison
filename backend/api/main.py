@@ -228,3 +228,34 @@ def health_check():
         "chunks_loaded": chunks_loaded,
         "groq_key_present": groq_key_present,
     }
+
+
+# --------------------------------------------------------------------
+# ADMIN ENDPOINTS
+# --------------------------------------------------------------------
+
+@app.delete("/admin/cache")
+def clear_semantic_cache():
+    """
+    Wipe all entries from the in-memory semantic cache and reset the
+    persistent ``artifacts/semantic_cache.json`` file to an empty list.
+
+    Use this during development whenever you deploy a pipeline change
+    (new model, new prompt, new offset constant) that would make cached
+    responses stale.
+
+    Returns
+    -------
+    JSON object with:
+    - ``status``         : ``"success"``
+    - ``message``        : Human-readable confirmation.
+    - ``entries_cleared``: Number of cache entries that were removed.
+    """
+    entries_before: int = _cache.size
+    _cache.clear()
+    return {
+        "status":          "success",
+        "message":         "Semantic cache cleared successfully.",
+        "entries_cleared": entries_before,
+    }
+
