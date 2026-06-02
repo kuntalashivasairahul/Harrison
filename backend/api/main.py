@@ -17,6 +17,7 @@ from backend.utils.scoring import calculate_confidence
 from backend.rendering.page_resolver import resolve_page_urls
 from backend.agents.query_optimizer import optimize_query
 from backend.agents.semantic_cache import SemanticCache
+from backend.agents.context_router import route_and_sort_context
 from backend.retrieval.embeddings import embed_text
 
 app = FastAPI(title="HarrisonGPT")
@@ -142,6 +143,12 @@ def ask_question(req: QueryRequest, request: Request) -> QueryResponse:
         )
     else:
         retrieved_chunks = retrieve(search_query)
+
+    # 2.5️⃣ ContextRouter — deduplicate & chronological sort
+    # Drops near-identical chunks (>90% overlap) and re-orders survivors
+    # by ascending page number so the LLM reads Harrison sequentially.
+    # Pure function: no LLM call, sub-millisecond, crash-safe.
+    retrieved_chunks = route_and_sort_context(retrieved_chunks)
 
     # 3️⃣ Fuse context
     fused_context = fuse_context(retrieved_chunks)
