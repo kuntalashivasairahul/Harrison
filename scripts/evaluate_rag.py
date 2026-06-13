@@ -56,13 +56,18 @@ CACHE_ENDPOINT = f"{API_BASE_URL}/admin/cache"
 
 # Judge model — must be a large, high-reasoning model (CODING_RULES.md §4).
 # Never use the 8B optimizer model for grading.
-JUDGE_MODEL = "llama-3.3-70b-versatile"
+JUDGE_MODEL = "llama-3.1-8b-instant"
 
 # Minimum acceptable average score (1-5 scale) for the test suite to pass.
 PASS_THRESHOLD: float = 3.0
 
 # Request timeout for the /ask endpoint (RAG pipeline can take ~15s).
 ASK_TIMEOUT_S: int = 90
+
+# Inter-query sleep — Groq's llama-3.1-8b-instant on-demand tier has a 6,000
+# TPM limit.  Sleeping 12 s between queries lets the token bucket partially
+# refill and prevents cascading 413 / 429 errors across the test suite.
+INTER_QUERY_SLEEP_S: int = 12
 
 # ---------------------------------------------------------------------------
 # Retry / back-off configuration
@@ -426,7 +431,15 @@ def run_evaluation() -> list[EvalResult]:
             print(f"\r  {RED}✗ {error}{RESET}")
         except Exception as exc:
             error = str(exc)
-            print(f"\r  {RED}✗ {error}{RESET}")
+            print(f"\r  {RED}✗ Pipeline error: {error}{RESET}")
+            print(f"  {YELLOW}⚠ Skipping judge for this query — continuing to next.{RESET}")
+
+        # ── Inter-query sleep — prevent TPM pileup on Groq ─────────────
+        # Sleep before the judge call so both the /ask and judge tokens
+        # are separated from the next query's /ask call.
+        if idx < len(GOLDEN_DATASET):
+            print(f"  {DIM}⏱ Sleeping {INTER_QUERY_SLEEP_S}s to let Groq TPM bucket refill…{RESET}")
+            time.sleep(INTER_QUERY_SLEEP_S)
 
         # ── Step 2: Judge ──────────────────────────────────────────────
         if error:

@@ -305,7 +305,7 @@ def optimize_query(raw_query: str) -> OptimizedQuery:
                 {"role": "user", "content": _USER_TEMPLATE.format(raw_query=raw_query)},
             ],
             temperature=_TEMPERATURE,
-            max_tokens=_MAX_TOKENS,
+            max_tokens=1024,
         )
 
         raw_content: str = response.choices[0].message.content or ""

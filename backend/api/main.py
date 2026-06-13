@@ -12,8 +12,7 @@ from backend.retrieval.rag import retrieve
 from backend.utils.fusion import fuse_context
 from backend.processing.evidence import extract_evidence, extract_sources
 from backend.llm.llm import ask_llm, REFUSAL_STR
-from backend.retrieval.rerank import top_score
-from backend.utils.scoring import calculate_confidence
+from backend.agents.confidence_scorer import calculate_confidence
 from backend.rendering.page_resolver import resolve_page_urls
 from backend.agents.query_optimizer import optimize_query
 from backend.agents.semantic_cache import SemanticCache
@@ -171,40 +170,40 @@ def ask_question(req: QueryRequest, request: Request) -> QueryResponse:
     # 5️⃣ Ask LLM
     #    question= uses raw_query so the answer is phrased naturally for
     #    the user; the enriched context already reflects search_query.
-    answer = ask_llm(
+    #    ask_llm() calls verify_answer() internally and returns the final
+    #    post-verification text.  We capture it as draft_answer here so we
+    #    can also pass it as original_answer to calculate_confidence.
+    #    If the draft is inaccessible (llm.py not modified), passing the
+    #    same string as both arguments produces zero divergence — no penalty.
+    draft_answer: str = ask_llm(
         fused_context=fused_context,
         question=raw_query,
         mode=mode,
         evidence=evidence,
     )
+    answer: str = draft_answer
 
     # ----------------------------------------------------------------
     # Phase 3 – populate confidence and sources from scoring pipeline.
     # ----------------------------------------------------------------
 
-    # 6️⃣ Extract the top Cross-Encoder score for confidence scoring.
-    #    Returns 0.0 safely when retrieved_chunks is empty.
-    best_score: float = top_score(retrieved_chunks)
-
-    # 7️⃣ Extract unique, sorted page references for the sources field.
+    # 6️⃣ Extract unique, sorted page references for the sources field.
     #    Returns [] safely when retrieved_chunks is empty.
     sources: List[str] = extract_sources(retrieved_chunks)
 
-    # 8️⃣ Determine whether verification actually ran.
-    #    verify_answer() is called unconditionally inside ask_llm() whenever
-    #    the LLM returns a real response.  We consider the answer "verified"
-    #    when ask_llm() did not return a known refusal/error sentinel.
-    was_verified: bool = bool(
-        answer
-        and answer != REFUSAL_STR
-        and not answer.startswith("LLM call failed:")
-    )
-
-    # 9️⃣ Calculate the unified confidence label.
+    # 7️⃣ Calculate the deterministic confidence label.
+    #    ConfidenceScorer combines two signals:
+    #      a) Average Cross-Encoder score across all retrieved chunks
+    #         (not just the top-1) for a richer retrieval quality estimate.
+    #      b) Length-ratio divergence between the draft and verified answer
+    #         — a proxy for how many unsupported claims the verifier pruned.
+    #    ask_llm() fuses both generation and verification internally, so we
+    #    pass draft_answer as both arguments (zero divergence, no penalty).
+    #    Upgrade llm.py to return (draft, verified) to unlock the penalty.
     confidence: str = calculate_confidence(
-        top_reranker_score=best_score,
-        evidence_count=len(evidence),
-        was_verified=was_verified,
+        chunks=retrieved_chunks,
+        original_answer=draft_answer,
+        verified_answer=draft_answer,
     )
 
     # 🔟 Resolve source page labels to image URLs.

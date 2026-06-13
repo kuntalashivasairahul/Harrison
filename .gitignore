@@ -27,3 +27,5 @@ Thumbs.db
 # IDEs
 .vscode/
 .cursor/
+
+*.pdf

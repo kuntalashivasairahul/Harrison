@@ -4,12 +4,21 @@ from backend.utils.fusion import clean_text
 
 def extract_evidence(chunks: List[Dict]) -> List[str]:
     """
-    Convert retrieved chunks into concise, page-cited evidence statements.
+    Convert retrieved chunks into page-cited evidence statements for the LLM.
 
-    Expected chunk keys:
-    - "text": raw chunk text
-    - "page": page number in Harrison
+    Each statement retains the full cleaned chunk text up to MAX_WORDS words
+    so that critical pathophysiological mechanisms, lab thresholds, and scoring
+    criteria are NOT discarded by an overly aggressive truncation heuristic.
+
+    Format: ``EVIDENCE: <text> [p:<page>]``
+
+    Expected chunk keys
+    -------------------
+    text : str   — raw chunk text
+    page : int   — Harrison page number
     """
+
+    MAX_WORDS = 400   # ~2 400 chars per chunk; generous but bounded
 
     evidence: List[str] = []
 
@@ -30,20 +39,22 @@ def extract_evidence(chunks: List[Dict]) -> List[str]:
         if not cleaned:
             continue
 
-        # Split into sentence-like segments
-        parts = [p.strip() for p in cleaned.split(".") if p.strip()]
-        if not parts:
-            continue
+        # Truncate to MAX_WORDS if the chunk is very long, but keep whole words
+        words = cleaned.split()
+        if len(words) > MAX_WORDS:
+            cleaned = " ".join(words[:MAX_WORDS])
+            # Avoid trailing partial sentence — trim to last full stop
+            last_stop = max(cleaned.rfind("."), cleaned.rfind("?"), cleaned.rfind("!"))
+            if last_stop > len(cleaned) // 2:   # only trim if the stop is in the second half
+                cleaned = cleaned[: last_stop + 1]
 
-        # Use up to TWO sentences instead of one (improves reasoning quality)
-        statement = ". ".join(parts[:2])
+        if not cleaned.endswith((".", "?", "!")):
+            cleaned += "."
 
-        if not statement.endswith("."):
-            statement += "."
-
-        evidence.append(f"EVIDENCE: {statement} [p:{page}]")
+        evidence.append(f"EVIDENCE: {cleaned} [p:{page}]")
 
     return evidence
+
 
 
 def extract_sources(chunks: List[Dict]) -> List[str]:

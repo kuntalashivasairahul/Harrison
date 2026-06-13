@@ -14,9 +14,9 @@ load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
-SMART_SUMMARY_MAX_TOKENS = int(os.getenv("SMART_SUMMARY_MAX_TOKENS", "2200"))
-QA_MAX_TOKENS = int(os.getenv("QA_MAX_TOKENS", "900"))
-SMART_SUMMARY_CONTEXT_CHAR_LIMIT = int(os.getenv("SMART_SUMMARY_CONTEXT_CHAR_LIMIT", "18000"))
+SMART_SUMMARY_MAX_TOKENS = int(os.getenv("SMART_SUMMARY_MAX_TOKENS", "1500"))
+QA_MAX_TOKENS = int(os.getenv("QA_MAX_TOKENS", "1500"))
+SMART_SUMMARY_CONTEXT_CHAR_LIMIT = int(os.getenv("SMART_SUMMARY_CONTEXT_CHAR_LIMIT", "12000"))
 
 REFUSAL_STR = "Insufficient information in the provided context."
 MISSING_INFO_STR = "Information not present in the retrieved Harrison excerpt."
@@ -93,7 +93,7 @@ def verify_answer(answer: str, context: str, mode: str = "qa", model: str = "lla
                 {"role": "user", "content": verify_user},
             ],
             temperature=0.0,
-            max_tokens=max_tokens,
+            max_tokens=1024,
         )
 
         verified = resp.choices[0].message.content
@@ -239,7 +239,7 @@ def ask_llm(
                 {"role": "user", "content": prompt},
             ],
             temperature=0.1 if mode == "smart_summary" else 0.2,
-            max_tokens=SMART_SUMMARY_MAX_TOKENS if mode == "smart_summary" else QA_MAX_TOKENS,
+            max_tokens=1024,
         )
 
         content = response.choices[0].message.content
