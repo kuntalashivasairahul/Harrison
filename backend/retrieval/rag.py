@@ -17,11 +17,12 @@ RRF_K = 60
 # final response.  Chunks below this threshold are considered irrelevant
 # noise that would pollute the LLM context.  The Cross-Encoder used
 # (ms-marco-MiniLM-L-6-v2) produces raw logits; empirically, scores below
-# -2.0 indicate near-zero relevance to the query.
-# Tune upward (e.g. -1.0) for stricter filtering, downward (e.g. -3.0) to
-# be more permissive.  The pipeline still returns [] gracefully if ALL
-# chunks are filtered out.
-RERANK_SCORE_THRESHOLD: float = -2.0
+# -2.0 indicate near-zero relevance to the query on web-search benchmarks.
+# NOTE: medical textbook paragraphs score lower on this general-domain
+# cross-encoder, so we use -3.0 to restore recall without fully disabling
+# the filter.  Tune upward (e.g. -1.0) for stricter filtering, downward
+# (e.g. -float('inf')) to disable entirely.
+RERANK_SCORE_THRESHOLD: float = -3.0
 
 
 # Load chunks metadata

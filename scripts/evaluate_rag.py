@@ -14,7 +14,7 @@ What it does
    live RAG pipeline — not a cached response.
 2. Iterates through a small Golden Dataset of clinical queries.
 3. POSTs each query to the /ask endpoint and records latency.
-4. Passes (query, expected_focus, generated_answer) to a Groq 70B judge
+4. Passes (query, expected_focus, generated_answer) to a Gemini judge
    model that returns a structured 1-5 score with reasoning.
 5. Prints a colour-formatted report to the terminal and exits with a
    non-zero code if any query scores below a minimum threshold.
@@ -23,14 +23,15 @@ Requirements
 ------------
 - The HarrisonGPT server must be running at API_BASE_URL (default:
   http://127.0.0.1:8000).
-- GROQ_API_KEY must be set in backend/.env or the environment.
-- Only stdlib + groq + python-dotenv are used (both already in requirements).
+- GEMINI_API_KEY (or GEMINI_API_KEY_1, _2, …) must be set in backend/.env.
+- Only stdlib + google-generativeai + python-dotenv are used.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -40,23 +41,29 @@ from pathlib import Path
 from typing import Optional
 
 from dotenv import load_dotenv
-from groq import Groq
+
+# ---------------------------------------------------------------------------
+# Bootstrap: add project root to sys.path so we can import from backend/
+# ---------------------------------------------------------------------------
+_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_ROOT))
+
+load_dotenv(_ROOT / "backend" / ".env")
+
+# Import Gemini KeyManager and dynamic models from the centralized llm module.
+import google.generativeai as genai
+from backend.llm.llm import key_manager, PROD_MODEL, BACKUP_MODEL
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 
-# Load GROQ_API_KEY from backend/.env (same location the server uses).
-_ROOT = Path(__file__).resolve().parents[1]
-load_dotenv(_ROOT / "backend" / ".env")
-
 API_BASE_URL   = os.getenv("HARRISONAI_API_URL", "http://127.0.0.1:8000")
 ASK_ENDPOINT   = f"{API_BASE_URL}/ask"
 CACHE_ENDPOINT = f"{API_BASE_URL}/admin/cache"
 
-# Judge model — must be a large, high-reasoning model (CODING_RULES.md §4).
-# Never use the 8B optimizer model for grading.
-JUDGE_MODEL = "llama-3.1-8b-instant"
+# Judge model — uses PROD_MODEL from Gemini (dynamically resolved).
+JUDGE_MODEL = PROD_MODEL
 
 # Minimum acceptable average score (1-5 scale) for the test suite to pass.
 PASS_THRESHOLD: float = 3.0
@@ -64,17 +71,18 @@ PASS_THRESHOLD: float = 3.0
 # Request timeout for the /ask endpoint (RAG pipeline can take ~15s).
 ASK_TIMEOUT_S: int = 90
 
-# Inter-query sleep — Groq's llama-3.1-8b-instant on-demand tier has a 6,000
-# TPM limit.  Sleeping 12 s between queries lets the token bucket partially
-# refill and prevents cascading 413 / 429 errors across the test suite.
-INTER_QUERY_SLEEP_S: int = 12
+# Inter-query sleep — respects Requests-Per-Minute limits on the Gemini API.
+# The HarrisonGPT server handles Gemini API 429 / Quota-Exceeded errors
+# internally via automatic API key rotation (see backend/llm/llm.py KeyManager).
+# This sleep throttles the judge calls to avoid cascading rate limits.
+INTER_QUERY_SLEEP_S: int = 2
 
 # ---------------------------------------------------------------------------
 # Retry / back-off configuration
 # ---------------------------------------------------------------------------
-# Both the /ask pipeline call and the Groq judge call can hit rate limits
+# Both the /ask pipeline call and the Gemini judge call can hit rate limits
 # (HTTP 429).  The wrapper below retries with exponential back-off + jitter
-# and honours the Retry-After header when Groq includes it.
+# and uses the KeyManager to rotate API keys on quota errors.
 
 RETRY_MAX_ATTEMPTS: int   = 5       # total attempts (1 original + 4 retries)
 RETRY_BASE_DELAY_S: float = 4.0    # seconds before first retry
@@ -87,11 +95,8 @@ import random
 
 def _parse_retry_after(exc: Exception) -> Optional[float]:
     """
-    Try to extract a Retry-After wait time (seconds) from a Groq or urllib
-    exception message.  Groq embeds it in the JSON error body as either:
-      "Please try again in 20m50.208s"
-      "Please try again in 45.3s"
-    Returns None if no parseable value is found.
+    Try to extract a Retry-After wait time (seconds) from a Gemini or urllib
+    exception message.  Returns None if no parseable value is found.
     """
     import re
     text = str(exc)
@@ -112,6 +117,7 @@ def _with_retry(fn, *args, label: str = "call", **kwargs):
       1. Parse the Retry-After duration from the error message.
       2. If found, sleep exactly that long (+ 2s safety margin).
       3. If not found, use exponential back-off with ±10% jitter.
+      4. Rotate to the next Gemini API key via KeyManager.
 
     Any non-rate-limit exception propagates immediately (fail fast).
     Returns the result of the first successful call.
@@ -125,7 +131,10 @@ def _with_retry(fn, *args, label: str = "call", **kwargs):
             return fn(*args, **kwargs)
         except Exception as exc:
             text = str(exc).lower()
-            is_rate_limit = "429" in text or "rate_limit" in text or "rate limit" in text
+            is_rate_limit = (
+                "429" in text or "rate_limit" in text or "rate limit" in text
+                or "quota" in text or "resourceexhausted" in text
+            )
 
             if not is_rate_limit:
                 raise  # propagate non-rate-limit errors immediately
@@ -136,12 +145,15 @@ def _with_retry(fn, *args, label: str = "call", **kwargs):
             if attempt == RETRY_MAX_ATTEMPTS:
                 break  # exhausted — fall through to raise
 
+            # Rotate API key before retrying
+            key_manager.rotate()
+
             if retry_after is not None:
                 wait = retry_after + 2.0  # small safety margin
                 print(
                     f"\n  {YELLOW}⏳ Rate limit hit on {label} "
                     f"(attempt {attempt}/{RETRY_MAX_ATTEMPTS}). "
-                    f"Groq says wait {retry_after:.0f}s — sleeping {wait:.0f}s…{RESET}",
+                    f"Gemini says wait {retry_after:.0f}s — sleeping {wait:.0f}s, rotating key…{RESET}",
                     flush=True,
                 )
             else:
@@ -151,7 +163,7 @@ def _with_retry(fn, *args, label: str = "call", **kwargs):
                 print(
                     f"\n  {YELLOW}⏳ Rate limit hit on {label} "
                     f"(attempt {attempt}/{RETRY_MAX_ATTEMPTS}). "
-                    f"Back-off {wait:.1f}s…{RESET}",
+                    f"Back-off {wait:.1f}s, rotating key…{RESET}",
                     flush=True,
                 )
                 delay = min(delay * RETRY_BACKOFF_FACTOR, RETRY_MAX_DELAY_S)
@@ -269,20 +281,8 @@ def _http_post(url: str, payload: dict, timeout: int = ASK_TIMEOUT_S) -> tuple[d
     return body, time.perf_counter() - t0
 
 # ---------------------------------------------------------------------------
-# Judge
+# Judge — Gemini-powered LLM-as-a-Judge
 # ---------------------------------------------------------------------------
-
-_groq_client: Optional[Groq] = None
-
-def _get_groq() -> Groq:
-    global _groq_client
-    if _groq_client is None:
-        api_key = os.getenv("GROQ_API_KEY")
-        if not api_key:
-            sys.exit(f"{RED}✗ GROQ_API_KEY not set. Check backend/.env{RESET}")
-        _groq_client = Groq(api_key=api_key)
-    return _groq_client
-
 
 JUDGE_SYSTEM = """\
 You are a rigorous medical AI evaluator assessing the quality of answers \
@@ -321,15 +321,43 @@ GENERATED ANSWER:
 JSON evaluation:"""
 
 
+# ---------------------------------------------------------------------------
+# JSON extraction helper (mirrors query_optimizer._extract_json)
+# ---------------------------------------------------------------------------
+# The judge LLM occasionally wraps its output in markdown fences or adds a
+# conversational preamble despite explicit instructions.  This helper tries
+# a direct parse first, then falls back to extracting the first {...} block.
+
+_JSON_BLOCK_RE = re.compile(r"\{.*?\}", re.DOTALL)
+
+
+def _extract_json(text: str) -> dict | None:
+    """Return the first JSON object found in *text*, or None."""
+    text = text.strip()
+    # Fast path: whole string is valid JSON.
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    # Slow path: locate the first {...} block and parse it.
+    match = _JSON_BLOCK_RE.search(text)
+    if match:
+        try:
+            return json.loads(match.group())
+        except json.JSONDecodeError:
+            pass
+    return None
+
+
 def judge_answer(query: str, expected_focus: str, answer: str) -> dict:
     """
-    Ask the 70B judge model to score the generated answer.
+    Ask the Gemini judge model to score the generated answer.
 
-    Retries automatically on 429 / rate-limit errors using exponential
-    back-off (see _with_retry).  Returns a dict with keys ``score`` (int)
-    and ``reasoning`` (str).  Falls back to score=0 on permanent failure.
+    Uses the centralized KeyManager for API key rotation.  Retries
+    automatically on 429 / rate-limit errors using exponential back-off
+    (see _with_retry).  Returns a dict with keys ``score`` (int) and
+    ``reasoning`` (str).  Falls back to score=0 on permanent failure.
     """
-    client = _get_groq()
     user_msg = JUDGE_USER_TEMPLATE.format(
         query=query,
         expected_focus=expected_focus,
@@ -337,27 +365,27 @@ def judge_answer(query: str, expected_focus: str, answer: str) -> dict:
     )
 
     def _call_judge():
-        return client.chat.completions.create(
-            model=JUDGE_MODEL,
-            messages=[
-                {"role": "system", "content": JUDGE_SYSTEM},
-                {"role": "user",   "content": user_msg},
-            ],
-            temperature=0.0,   # deterministic grading
-            max_tokens=256,
+        key_manager.configure_current()
+        gemini_model = genai.GenerativeModel(
+            model_name=JUDGE_MODEL,
+            system_instruction=JUDGE_SYSTEM,
+        )
+        return gemini_model.generate_content(
+            user_msg,
+            generation_config=genai.types.GenerationConfig(
+                temperature=0.0,   # deterministic grading
+                max_output_tokens=256,
+            ),
         )
 
     try:
         resp = _with_retry(_call_judge, label=f"judge ({JUDGE_MODEL})")
-        raw  = (resp.choices[0].message.content or "").strip()
+        raw = (resp.text or "").strip()
 
-        # Strip accidental markdown fences
-        if raw.startswith("```"):
-            raw = raw.split("```")[1].strip()
-            if raw.startswith("json"):
-                raw = raw[4:].strip()
+        payload = _extract_json(raw)
+        if payload is None:
+            raise ValueError(f"No valid JSON block found in judge output: {raw[:120]!r}")
 
-        payload = json.loads(raw)
         score   = int(payload.get("score", 0))
         if not 1 <= score <= 5:
             raise ValueError(f"score out of range: {score}")
@@ -434,11 +462,11 @@ def run_evaluation() -> list[EvalResult]:
             print(f"\r  {RED}✗ Pipeline error: {error}{RESET}")
             print(f"  {YELLOW}⚠ Skipping judge for this query — continuing to next.{RESET}")
 
-        # ── Inter-query sleep — prevent TPM pileup on Groq ─────────────
+        # ── Inter-query sleep — prevent rate-limit pileup on Gemini ────
         # Sleep before the judge call so both the /ask and judge tokens
         # are separated from the next query's /ask call.
         if idx < len(GOLDEN_DATASET):
-            print(f"  {DIM}⏱ Sleeping {INTER_QUERY_SLEEP_S}s to let Groq TPM bucket refill…{RESET}")
+            print(f"  {DIM}⏱ Sleeping {INTER_QUERY_SLEEP_S}s to respect Gemini API limits…{RESET}")
             time.sleep(INTER_QUERY_SLEEP_S)
 
         # ── Step 2: Judge ──────────────────────────────────────────────

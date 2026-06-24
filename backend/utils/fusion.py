@@ -53,16 +53,9 @@ def fuse_chunks(chunks) -> str:
 
         line = f"- {txt} [p:{page}|c:{chunk_id}]"
 
-        # Budget gate: stop adding chunks once we would exceed SAFE_CHAR_LIMIT
-        if running_chars + len(line) + 1 > SAFE_CHAR_LIMIT:
-            break
-
         parts.append(line)
-        running_chars += len(line) + 1   # +1 for the joining newline
 
     fused_context = "\n".join(parts)
-    # Absolute character hard-cap to guarantee the prompt context never exceeds budget (~2000 tokens)
-    fused_context = fused_context[:8000]
     return fused_context
 
 

@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import TypedDict
 
 from dotenv import load_dotenv
-from groq import Groq
+import google.generativeai as genai
 
 # ---------------------------------------------------------------------------
 # Environment & client setup
@@ -43,11 +43,12 @@ from groq import Groq
 
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
-_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+# API key configuration is handled centrally by KeyManager in llm.py.
+# Import here so the optimizer uses the same rotation pool.
+from backend.llm.llm import key_manager, BACKUP_MODEL
 
-# Fast, low-latency model — 8 k context is ample for query expansion.
-# llama-3.1-8b-instant is Groq's current recommended low-latency 8B model.
-_OPTIMIZER_MODEL = "llama-3.1-8b-instant"
+# Fast, low-latency model — resolved dynamically from Google's live API.
+_OPTIMIZER_MODEL = BACKUP_MODEL
 
 # Keep expansion tokens tight — we only need a small JSON object.
 _MAX_TOKENS = 256
@@ -298,17 +299,20 @@ def optimize_query(raw_query: str) -> OptimizedQuery:
         return _build_fallback("")
 
     try:
-        response = _client.chat.completions.create(
-            model=_OPTIMIZER_MODEL,
-            messages=[
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user", "content": _USER_TEMPLATE.format(raw_query=raw_query)},
-            ],
-            temperature=_TEMPERATURE,
-            max_tokens=1024,
+        key_manager.configure_current()
+        gemini_model = genai.GenerativeModel(
+            model_name=_OPTIMIZER_MODEL,
+            system_instruction=_SYSTEM_PROMPT
+        )
+        response = gemini_model.generate_content(
+            _USER_TEMPLATE.format(raw_query=raw_query),
+            generation_config=genai.types.GenerationConfig(
+                temperature=_TEMPERATURE,
+                max_output_tokens=1024,
+            )
         )
 
-        raw_content: str = response.choices[0].message.content or ""
+        raw_content: str = response.text or ""
         payload = _extract_json(raw_content)
 
         if payload is None:
