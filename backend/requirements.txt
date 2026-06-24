@@ -3,6 +3,6 @@ uvicorn
 faiss-cpu
 sentence-transformers
 numpy
-groq
+google-generativeai
 python-dotenv
 rank-bm25

@@ -11,7 +11,7 @@ from backend.retrieval import rag
 from backend.retrieval.rag import retrieve
 from backend.utils.fusion import fuse_context
 from backend.processing.evidence import extract_evidence, extract_sources
-from backend.llm.llm import ask_llm, REFUSAL_STR
+from backend.llm.llm import ask_llm, REFUSAL_STR, key_manager
 from backend.agents.confidence_scorer import calculate_confidence
 from backend.rendering.page_resolver import resolve_page_urls
 from backend.agents.query_optimizer import optimize_query
@@ -238,13 +238,14 @@ def ask_question(req: QueryRequest, request: Request) -> QueryResponse:
 def health_check():
     faiss_loaded = rag.index is not None
     chunks_loaded = isinstance(rag.chunks, list) and len(rag.chunks) > 0
-    groq_key_present = bool(os.getenv("GROQ_API_KEY"))
+    gemini_key_present = key_manager.has_keys()
 
     return {
-        "status": "ok" if (faiss_loaded and chunks_loaded and groq_key_present) else "degraded",
+        "status": "ok" if (faiss_loaded and chunks_loaded and gemini_key_present) else "degraded",
         "faiss_loaded": faiss_loaded,
         "chunks_loaded": chunks_loaded,
-        "groq_key_present": groq_key_present,
+        "gemini_key_present": gemini_key_present,
+        "gemini_key_count": key_manager.key_count,
     }
 
 
