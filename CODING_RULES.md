@@ -52,8 +52,10 @@ paper — except the reader may act on it clinically.
 ```
 
 `verify_answer()` is the last safety gate before the response reaches the
-caller. Its presence in `ask_llm()` is an **architectural invariant**, not a
-feature flag. See §RULE 3.2 for AI-specific enforcement.
+caller. It may only be bypassed when an explicit API request sets
+`disable_verifier=true`; those responses are capped in confidence and are not
+eligible for semantic-cache persistence. See §RULE 3.2 for AI-specific
+enforcement.
 
 ---
 
@@ -68,7 +70,7 @@ introduces bugs that are extremely hard to trace in a pipeline system.**
 |--------------------|------------------------------------------------|---------------------------------------|
 | `api/main.py`      | All backend modules (orchestration only)       | Business logic, retrieval math        |
 | `retrieval/`       | `embeddings.py`, `rerank.py`, `rank_bm25`      | FastAPI, `llm/`, `rendering/`         |
-| `llm/`             | `groq`, `os`, `re`, `pathlib`                  | FastAPI, `retrieval/`, `rendering/`   |
+| `llm/`             | `google.genai`, `os`, `re`, `pathlib`          | FastAPI, `retrieval/`, `rendering/`   |
 | `processing/`      | `utils/fusion.py` only                         | FastAPI, `retrieval/`, `llm/`         |
 | `rendering/`       | `re`, `typing`                                 | FastAPI, `retrieval/`, `llm/`         |
 | `utils/`           | Standard library only                          | Any domain module                     |
@@ -85,12 +87,12 @@ introduces bugs that are extremely hard to trace in a pipeline system.**
 **Do not move RRF scoring, BM25 tokenization, FAISS search, neighbor
 expansion, or the hard filter into `api/main.py` or `utils/`.**
 
-The following constants are defined in `backend/retrieval/rag.py` and are
+The following constants are defined in `backend/config.py` and are
 **immutable**:
 
 ```python
 RRF_K                  = 60     # Reciprocal Rank Fusion K
-RERANK_SCORE_THRESHOLD = -2.0   # Hard filter logit threshold
+RERANK_SCORE_THRESHOLD = -3.0   # Hard filter logit threshold
 ```
 
 Any change to these values requires a documented rationale with empirical
@@ -102,7 +104,7 @@ The following functions are **pure** (no I/O, no side effects) and must
 remain so:
 
 ```python
-calculate_confidence(top_reranker_score, evidence_count, was_verified) → str
+calculate_confidence(chunks, original_answer, verified_answer) → str
 extract_evidence(chunks)  → List[str]
 extract_sources(chunks)   → List[str]
 resolve_page_urls(sources, base_url) → List[Dict[str, str]]
@@ -143,7 +145,7 @@ should be excluded from IDE workspace indexing settings.
 An AI assistant **must NEVER**:
 
 ```
-❌ Remove, comment out, or wrap verify_answer() in a conditional.
+❌ Remove or bypass `verify_answer()` outside the documented `disable_verifier` request option.
 ❌ Remove, comment out, or wrap resolve_page_urls() in a conditional.
 ❌ Remove, comment out, or bypass the RERANK_SCORE_THRESHOLD filter.
 ❌ Remove the confidence, sources, or visual_context fields from QueryResponse.
@@ -165,7 +167,7 @@ An AI assistant **must ALWAYS**:
 
 Before proposing a refactor, an AI assistant must verify:
 
-1. **Does the refactor preserve the 14-stage pipeline order?** (See `ARCHITECTURE.md §1`)
+1. **Does the refactor preserve the documented request flow?** (See `ARCHITECTURE.md §1`)
 2. **Does the refactor preserve the `QueryResponse` schema?** (See `ARCHITECTURE.md §2`)
 3. **Does the refactor maintain module isolation?** (See RULE 2.1 above)
 4. **Does the refactor avoid touching `artifacts/` or `storage/`?**
@@ -178,7 +180,8 @@ written justification before execution.
 ## RULE 4 — Prompting Standards
 
 **The LLM prompts are load-bearing architecture.** Changes to
-`BASE_QA_PROMPT` or `SMART_SUMMARY_PROMPT` in `backend/llm/llm.py` affect
+`MASTER_MEDICAL_SYNTHESIS_PROMPT` or smart-summary formatting logic in
+`backend/llm/llm.py` affects
 every response the system produces.
 
 ### 4.1 Mandatory Prompt Prohibitions
@@ -246,7 +249,7 @@ the `/ask` endpoint with at least one `smart_summary` and one `qa` query:
 - `backend/retrieval/rag.py`
 - `backend/llm/llm.py`
 - `backend/api/main.py`
-- `backend/utils/scoring.py`
+- `backend/agents/confidence_scorer.py`
 - `backend/retrieval/rerank.py`
 
 ### 5.2 Confidence Score Smoke Test
@@ -264,7 +267,8 @@ considered complete:
 
 ```bash
 curl http://127.0.0.1:8000/health
-# Expected: {"status":"ok","faiss_loaded":true,"chunks_loaded":true,"groq_key_present":true}
+# Expected fields include: status=ok, faiss_loaded=true, chunks_loaded=true,
+# embedding_index_dim_match=true, and gemini_key_present=true.
 ```
 
 ### 5.4 Evaluation Harness
@@ -288,7 +292,7 @@ uvicorn
 faiss-cpu
 sentence-transformers
 numpy
-groq
+google-genai
 python-dotenv
 rank-bm25
 PyMuPDF          ← for pre-processing page renders (offline only)
@@ -321,7 +325,7 @@ Adding any new dependency requires:
 │ Keep module isolation  │ Entangle retrieval with routing    │
 │ Keep REFUSAL_STR exact │ Reword the refusal                 │
 │ Keep RRF_K = 60        │ Change fusion math ad-hoc          │
-│ Keep threshold = -2.0  │ Relax the hard filter silently     │
+│ Keep threshold = -3.0  │ Relax the hard filter silently     │
 │ Log side-effects in API│ Add I/O to pure functions          │
 │ Exclude artifacts/     │ Let AI index vectorstore data      │
 └────────────────────────┴────────────────────────────────────┘

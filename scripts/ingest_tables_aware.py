@@ -29,7 +29,7 @@ This script replaces the naive chunking step with a surgical pipeline:
      atomic units and emitted as single chunks, prefixed with the heading.
 
   4. **Large-table row-split fallback** — when a table exceeds
-     ``--max-table-chars`` (default 1 800, ≈ 512 tokens for all-MiniLM-L6-v2),
+     ``--max-table-chars`` (default 1 800, about 512 embedding-model tokens),
      it is split into row batches of ``--table-rows-per-batch`` (default 20).
      Every batch is prefixed with the **original header row + separator row**
      so column context is never lost.
@@ -37,8 +37,8 @@ This script replaces the naive chunking step with a surgical pipeline:
   5. **Prose chunking** — non-table text is split at ``--chunk-size`` characters
      with ``--overlap`` character overlap, preferring sentence boundaries.
 
-  6. **Dense embedding** — SentenceTransformers(``all-MiniLM-L6-v2``) produces
-     384-dim L2-normalised vectors identical to the live pipeline.
+  6. **Dense embedding** — SentenceTransformers(``BAAI/bge-m3``) produces
+     1024-dim L2-normalised vectors identical to the live pipeline.
      Apple Silicon MPS is used when available; falls back to CPU silently.
 
   7. **FAISS index** — ``IndexFlatL2`` for exact nearest-neighbour search,
@@ -121,6 +121,10 @@ log = logging.getLogger("ingest_tables_aware")
 # ---------------------------------------------------------------------------
 
 _ROOT = Path(__file__).resolve().parents[1]
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
+from backend.config import EMBEDDING_DIM, EMBEDDING_MODEL
 
 DEFAULT_SOURCE = _ROOT / "data" / "harrison.md"
 
@@ -136,13 +140,6 @@ PROD_CHUNKS = PROD_DIR / "chunks.json"
 
 # Backup directory root — timestamped subdirs created per promotion
 BACKUP_ROOT = _ROOT / "artifacts" / "vectorstore_backup"
-
-# ---------------------------------------------------------------------------
-# Model constants  (must match backend/retrieval/embeddings.py exactly)
-# ---------------------------------------------------------------------------
-
-EMBEDDING_MODEL = "all-MiniLM-L6-v2"
-EMBEDDING_DIM   = 384
 
 # ---------------------------------------------------------------------------
 # Chunking defaults
@@ -780,7 +777,7 @@ def load_embedding_model(device: Optional[str] = None) -> SentenceTransformer:
     A loaded SentenceTransformer instance ready for encode().
     """
     if device is None:
-        device = "mps" if torch.backends.mps.is_available() else "cpu"
+        device = "cpu"
     log.info(
         "Loading SentenceTransformer('%s') on device='%s'…",
         EMBEDDING_MODEL, device,
@@ -796,10 +793,10 @@ def embed_chunks(
     batch_size: int = DEFAULT_BATCH_SIZE,
 ) -> np.ndarray:
     """
-    Generate L2-normalised 384-dim embeddings for all chunks.
+    Generate L2-normalised embeddings for all chunks.
 
-    Returns an ``(N, 384)`` float32 numpy array suitable for direct insertion
-    into a FAISS ``IndexFlatL2`` index.
+    Returns an ``(N, EMBEDDING_DIM)`` float32 numpy array suitable for direct
+    insertion into a FAISS ``IndexFlatL2`` index.
     """
     texts = [c.text for c in chunks]
     log.info("Embedding %d chunks in batches of %d…", len(texts), batch_size)
@@ -871,6 +868,57 @@ def backup_production() -> Optional[Path]:
         log.info("Backed up production chunks → %s", backup_dir / "chunks.json")
 
     return backup_dir
+
+
+def promote_only(no_backup: bool = False) -> None:
+    """
+    Promote existing staging outputs directly to production without
+    rebuilding, re-embedding, or loading any models.
+    """
+    if not STAGING_INDEX.exists():
+        log.error("Staging index missing: %s", STAGING_INDEX)
+        sys.exit(1)
+    if not STAGING_CHUNKS.exists():
+        log.error("Staging chunks missing: %s", STAGING_CHUNKS)
+        sys.exit(1)
+
+    log.info("=" * 60)
+    log.info("PROMOTE-ONLY: copying staging outputs → production vectorstore…")
+
+    if not no_backup:
+        backup_dir = backup_production()
+        if backup_dir:
+            log.info("Production backup stored at: %s", backup_dir)
+    else:
+        log.warning(
+            "--no-backup specified: existing production files will be "
+            "OVERWRITTEN without a backup."
+        )
+
+    PROD_DIR.mkdir(parents=True, exist_ok=True)
+
+    shutil.copy2(STAGING_INDEX, PROD_INDEX)
+    log.info("Promoted FAISS index  → %s  (%d bytes)", PROD_INDEX, PROD_INDEX.stat().st_size)
+
+    shutil.copy2(STAGING_CHUNKS, PROD_CHUNKS)
+    log.info("Promoted chunk registry → %s  (%d bytes)", PROD_CHUNKS, PROD_CHUNKS.stat().st_size)
+
+    # Post-promotion safety checks
+    if not PROD_INDEX.exists():
+        raise RuntimeError(f"FATAL: production index missing after promotion: {PROD_INDEX}")
+    if not PROD_CHUNKS.exists():
+        raise RuntimeError(f"FATAL: production chunks missing after promotion: {PROD_CHUNKS}")
+
+    log.info("=" * 60)
+    log.warning(
+        "⚠️  IMPORTANT: The running uvicorn server may still have the old\n"
+        "    index and chunks in memory and should be restarted after promotion\n"
+        "    to activate the new table-aware index.\n\n"
+        "    To restart, kill the current uvicorn process, then run:\n"
+        "        .venv312/bin/python -m uvicorn backend.api.main:app "
+        "--reload --host 127.0.0.1 --port 8000\n"
+        "    Then verify: curl http://127.0.0.1:8000/health"
+    )
 
 
 def save_outputs(
@@ -956,18 +1004,19 @@ def save_outputs(
     shutil.copy2(STAGING_CHUNKS, PROD_CHUNKS)
     log.info("Promoted chunk registry → %s  (%d bytes)", PROD_CHUNKS, PROD_CHUNKS.stat().st_size)
 
-    # Post-promotion safety assertion
-    assert PROD_INDEX.exists(), "FATAL: production index missing after promotion!"
-    assert PROD_CHUNKS.exists(), "FATAL: production chunks missing after promotion!"
+    # Post-promotion safety checks
+    if not PROD_INDEX.exists():
+        raise RuntimeError(f"FATAL: production index missing after promotion: {PROD_INDEX}")
+    if not PROD_CHUNKS.exists():
+        raise RuntimeError(f"FATAL: production chunks missing after promotion: {PROD_CHUNKS}")
 
     log.info("=" * 60)
     log.warning(
-        "⚠️  IMPORTANT: The uvicorn server loads index.faiss and chunks.json\n"
-        "    at startup (rag.py module import time).  The running server is\n"
-        "    still using the OLD index.\n\n"
-        "    Restart the server to activate the new table-aware index:\n"
-        "        kill the current uvicorn process, then:\n"
-        "        .venv/bin/python -m uvicorn backend.api.main:app "
+        "⚠️  IMPORTANT: The running uvicorn server may still have the old\n"
+        "    index and chunks in memory and should be restarted after promotion\n"
+        "    to activate the new table-aware index.\n\n"
+        "    To restart, kill the current uvicorn process, then run:\n"
+        "        .venv312/bin/python -m uvicorn backend.api.main:app "
         "--reload --host 127.0.0.1 --port 8000\n"
         "    Then verify: curl http://127.0.0.1:8000/health"
     )
@@ -1072,7 +1121,7 @@ def parse_args() -> argparse.Namespace:
         help=(
             f"Character threshold above which a Markdown table is split into "
             f"row batches (default: {DEFAULT_MAX_TABLE_CHARS}).  Tune this "
-            f"to stay within all-MiniLM-L6-v2's 256-token context window "
+            f"to stay within the embedding model's token window "
             f"(~1 char ≈ 0.28 tokens)."
         ),
     )
@@ -1110,6 +1159,14 @@ def parse_args() -> argparse.Namespace:
             "OVERWRITTEN without a recovery point."
         ),
     )
+    p.add_argument(
+        "--promote-only",
+        action="store_true",
+        help=(
+            "Promote existing staging outputs directly to production without "
+            "rebuilding, re-embedding, or loading any models."
+        ),
+    )
     return p.parse_args()
 
 
@@ -1127,6 +1184,10 @@ def main() -> None:
     assert STAGING_CHUNKS.resolve() != PROD_CHUNKS.resolve(), (
         "FATAL: staging chunks path resolves to the production chunks — aborting."
     )
+
+    if args.promote_only:
+        promote_only(no_backup=args.no_backup)
+        return
 
     # ── 1. Load source text ───────────────────────────────────────────────
     source = args.source.resolve()

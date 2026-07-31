@@ -67,20 +67,20 @@ citation grounding over raw creativity.**
 |------------------------|------------------------------------------|---------------------------------|
 | `faiss-cpu`            | Dense vector search (ANN)                | `backend/retrieval/rag.py`      |
 | `rank-bm25`            | Sparse lexical search (BM25Okapi)        | `backend/retrieval/rag.py`      |
-| `sentence-transformers`| Embedding (`all-MiniLM-L6-v2`) + Cross-Encoder (`ms-marco-MiniLM-L-6-v2`) | `backend/retrieval/embeddings.py`, `backend/retrieval/rerank.py` |
+| `sentence-transformers`| Embedding (`BAAI/bge-m3`, 1024 dimensions) + Cross-Encoder (`ms-marco-MiniLM-L-6-v2`) | `backend/retrieval/embeddings.py`, `backend/retrieval/rerank.py` |
 
 ### 4.3 Language Model
 
 | Library  | Role                                                  | Key File                |
 |----------|-------------------------------------------------------|-------------------------|
-| `groq`   | LLM inference via Groq Cloud (`llama-3.3-70b-versatile`) | `backend/llm/llm.py` |
+| `google-genai` | Gemini inference, dynamic model selection, and rotating key clients | `backend/llm/llm.py` |
 
 ### 4.4 Text Processing & Utilities
 
 | Library / Module            | Role                                               | Key File                              |
 |-----------------------------|----------------------------------------------------|---------------------------------------|
 | `backend/utils/fusion.py`   | Context window construction (`fuse_context`)       | `backend/utils/fusion.py`             |
-| `backend/utils/scoring.py`  | Confidence label calculation (`calculate_confidence`) | `backend/utils/scoring.py`         |
+| `backend/agents/confidence_scorer.py` | Confidence label calculation (`calculate_confidence`) | `backend/agents/confidence_scorer.py` |
 | `backend/processing/evidence.py` | Evidence extraction & source deduplication  | `backend/processing/evidence.py`      |
 
 ### 4.5 Page Rendering & Visual Grounding
@@ -96,20 +96,20 @@ citation grounding over raw creativity.**
 
 ## 5. Key Runtime Constants
 
-These values are defined in `backend/config.py` and `backend/retrieval/rag.py`.
+These values are defined in `backend/config.py`.
 They must **not** be changed without updating this document.
 
 ```python
 # backend/config.py
-EMBEDDING_MODEL  = "sentence-transformers/all-MiniLM-L6-v2"
+EMBEDDING_MODEL  = "BAAI/bge-m3"
+EMBEDDING_DIM    = 1024
 RERANK_MODEL     = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 DEFAULT_K        = 30       # FAISS/BM25 candidates per query
 DEFAULT_FINAL_K  = 6        # Final chunks passed to LLM
 DEFAULT_RERANK_POOL = 24    # Pool size fed to cross-encoder
 RRF_K            = 60       # Reciprocal Rank Fusion K hyperparameter
 
-# backend/retrieval/rag.py
-RERANK_SCORE_THRESHOLD = -2.0   # Hard filter: drop chunks below this logit
+RERANK_SCORE_THRESHOLD = -3.0   # Hard filter: drop chunks below this logit
 ```
 
 ---
@@ -132,31 +132,63 @@ All secrets are stored in `backend/.env` (git-ignored).
 
 | Variable                       | Default  | Purpose                                       |
 |--------------------------------|----------|-----------------------------------------------|
-| `GROQ_API_KEY`                 | —        | Groq Cloud inference key (**required**)       |
-| `SMART_SUMMARY_MAX_TOKENS`     | `2200`   | Max tokens for smart_summary LLM call         |
-| `QA_MAX_TOKENS`                | `900`    | Max tokens for qa LLM call                    |
-| `SMART_SUMMARY_CONTEXT_CHAR_LIMIT` | `18000` | Character cap applied to fused context     |
-| `SMART_SUMMARY_K`              | `48`     | Candidate retrieval K in smart_summary mode   |
-| `SMART_SUMMARY_FINAL_K`        | `12`     | Final-K in smart_summary mode                 |
-| `SMART_SUMMARY_RERANK_POOL`    | `16`     | Rerank pool in smart_summary mode             |
+| `GEMINI_API_KEY`               | —        | Gemini key; used as key-pool slot 1 when numbered key 1 is absent |
+| `GEMINI_API_KEY_1` ... `_10`   | —        | Optional Gemini key pool. Calls advance round-robin; 429/quota keys are skipped for the process lifetime. |
+| `SMART_SUMMARY_MAX_TOKENS`     | `3000`   | Generation and normal verification ceiling for `smart_summary` |
+| `QA_MAX_TOKENS`                | `3000`   | Generation and normal verification ceiling for `qa` |
+| `SMART_SUMMARY_CONTEXT_CHAR_LIMIT` | `12000` | Loaded by the LLM module, but not consumed by current fusion logic |
+| `SMART_SUMMARY_K`              | `48`     | Candidate retrieval K in `smart_summary` mode |
+| `SMART_SUMMARY_FINAL_K`        | `12`     | Cap on complexity-driven final-K in `smart_summary` mode |
+| `SMART_SUMMARY_RERANK_POOL`    | `16`     | Rerank pool in `smart_summary` mode           |
 
 ---
 
 ## 8. Health & Observability
 
-The `/health` endpoint reports three liveness signals:
+The `/health` endpoint reports index, embedding, and Gemini-key readiness:
 
 ```json
 {
   "status": "ok | degraded",
   "faiss_loaded": true,
   "chunks_loaded": true,
-  "groq_key_present": true
+  "faiss_dim": 1024,
+  "embedding_dim": 1024,
+  "embedding_index_dim_match": true,
+  "gemini_key_present": true,
+  "gemini_key_count": 1
 }
 ```
 
 A `degraded` status means at least one of: FAISS index missing, chunks JSON
-empty, or `GROQ_API_KEY` not set.
+empty, no Gemini key is available, or the active embedding model dimension
+does not match the loaded FAISS index.
+
+---
+
+## 9. Smart Summary Runtime Behavior
+
+`smart_summary` uses the mode-specific retrieval values above. The query
+optimizer returns `simple` or `complex`; the API chooses final-K `5` or `12`,
+respectively, then caps it at `SMART_SUMMARY_FINAL_K`. The model output is
+forced to begin with `Topic received — generating Harrison Smart Summary.`.
+Sections are generated only when supported by available content; the runtime
+does not pad omitted sections with placeholder text.
+
+Context fusion has a fixed 12,000-character `SAFE_CHAR_LIMIT` for both modes.
+`SMART_SUMMARY_CONTEXT_CHAR_LIMIT` is therefore informational in the current
+implementation, not a live override of that fusion budget.
+
+---
+
+## 10. Local Runtime
+
+Create or refresh the supported Python 3.12 environment with:
+
+```bash
+./scripts/setup_env.sh
+.venv312/bin/python -m uvicorn backend.api.main:app --reload --host 127.0.0.1 --port 8000
+```
 
 ---
 

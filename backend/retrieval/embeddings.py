@@ -1,9 +1,22 @@
 from sentence_transformers import SentenceTransformer
 import numpy as np
 
-# load MiniLM (small + fast + free)
-model = SentenceTransformer("all-MiniLM-L6-v2")
+from backend.config import EMBEDDING_MODEL
+
+
+model = SentenceTransformer(EMBEDDING_MODEL)
+
+
+def embedding_dimension() -> int:
+    if hasattr(model, "get_embedding_dimension"):
+        return int(model.get_embedding_dimension())
+    return int(model.get_sentence_embedding_dimension())
+
 
 def embed_text(text: str):
-    embedding = model.encode([text], convert_to_numpy=True)
+    embedding = model.encode(
+        [text],
+        convert_to_numpy=True,
+        normalize_embeddings=True,
+    )
     return np.array(embedding).astype("float32")

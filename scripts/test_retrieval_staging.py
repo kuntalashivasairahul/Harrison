@@ -66,8 +66,8 @@ from backend.config import (
     RRF_K,
 )
 
-CHUNKS_PATH  = _ROOT / "artifacts" / "vectorstore" / "chunks.json"
-INDEX_PATH   = _ROOT / "artifacts" / "vectorstore" / "index.faiss"
+CHUNKS_PATH = _ROOT / "artifacts" / "vectorstore_staging" / "table_chunks.json"
+INDEX_PATH = _ROOT / "artifacts" / "vectorstore_staging" / "table_index.faiss"
 
 # ---------------------------------------------------------------------------
 # Pipeline constants — must match rag.py exactly

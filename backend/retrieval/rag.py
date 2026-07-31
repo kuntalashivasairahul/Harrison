@@ -5,24 +5,10 @@ import time
 from pathlib import Path
 from typing import Dict, List
 
+from backend.config import RERANK_SCORE_THRESHOLD, RRF_K
 from backend.retrieval.embeddings import embed_text
 from rank_bm25 import BM25Okapi
 from backend.retrieval.rerank import rerank
-
-
-# Reciprocal Rank Fusion hyperparameter (standard choice ~60)
-RRF_K = 60
-
-# Minimum Cross-Encoder score a chunk must achieve to be included in the
-# final response.  Chunks below this threshold are considered irrelevant
-# noise that would pollute the LLM context.  The Cross-Encoder used
-# (ms-marco-MiniLM-L-6-v2) produces raw logits; empirically, scores below
-# -2.0 indicate near-zero relevance to the query on web-search benchmarks.
-# NOTE: medical textbook paragraphs score lower on this general-domain
-# cross-encoder, so we use -3.0 to restore recall without fully disabling
-# the filter.  Tune upward (e.g. -1.0) for stricter filtering, downward
-# (e.g. -float('inf')) to disable entirely.
-RERANK_SCORE_THRESHOLD: float = -3.0
 
 
 # Load chunks metadata
@@ -77,29 +63,24 @@ def expand_query(query: str, max_queries: int = 4) -> List[str]:
     if not q:
         return [q]
 
-    variants = {q}
+    # Keep variants ordered.  A set here made the capped expansion list vary
+    # across Python processes, which made retrieval diagnostics irreproducible.
+    variants = [q]
+
+    def add_variant(value: str) -> None:
+        if value not in variants:
+            variants.append(value)
+
     lower = q.lower()
 
     # Basic paraphrases geared towards textbook-style retrieval
-    variants.add(f"Harrison textbook explanation of {q}")
-    variants.add(f"clinical features, diagnosis and management of {q} in Harrison")
+    add_variant(f"Harrison textbook explanation of {q}")
+    add_variant(f"clinical features, diagnosis and management of {q} in Harrison")
     if not lower.startswith("what is"):
-        variants.add(f"What is {q}?")
-    variants.add(f"high-yield summary of {q} from Harrison")
+        add_variant(f"What is {q}?")
+    add_variant(f"high-yield summary of {q} from Harrison")
 
-    # Preserve insertion order while enforcing max_queries
-    ordered: List[str] = []
-    for v in variants:
-        if v not in ordered:
-            ordered.append(v)
-        if len(ordered) >= max_queries:
-            break
-
-    # Ensure original query is first
-    if q in ordered:
-        ordered.remove(q)
-    ordered.insert(0, q)
-    return ordered[:max_queries]
+    return variants[:max_queries]
 
 
 # --- Filtering utilities ---
@@ -181,7 +162,10 @@ def _hybrid_candidates(
             # get top bm25_k doc indices by score
             indexed_scores = list(enumerate(scores))
             indexed_scores.sort(key=lambda x: x[1], reverse=True)
-            top_bm25 = indexed_scores[:bm25_k]
+            # A zero BM25 score means no lexical overlap.  Including those
+            # arbitrary documents pollutes the RRF/reranker pool on weak
+            # queries without adding lexical evidence.
+            top_bm25 = [item for item in indexed_scores if item[1] > 0][:bm25_k]
             for rank, (idx, score) in enumerate(top_bm25, start=1):
                 if idx < 0 or idx >= len(chunks):
                     continue
@@ -301,6 +285,7 @@ def retrieve(
     final_k: int = 6,
     rerank_pool: int = 24,
     bm25_k: int = 30,
+    timings: dict | None = None,
 ) -> List[Dict]:
     """
     Multi-query hybrid retrieval:
@@ -311,6 +296,8 @@ def retrieve(
     5) Neighbor expansion to form rerank pool
     6) Cross-encoder rerank to pick top final_k
     """
+
+    t_start = time.perf_counter()
 
     if not chunks:
         return []
@@ -356,8 +343,16 @@ def retrieve(
     # 4–5) Filter + RRF sort + neighbor expansion to form rerank pool
     rerank_inputs = _pretrim_for_rerank(merged_candidates, final_k=final_k, rerank_pool=rerank_pool)
 
+    t_retrieval_done = time.perf_counter()
+    if timings is not None:
+        timings["retrieval"] = t_retrieval_done - t_start
+
     # 6) Cross-encoder rerank
+    t_rerank_start = time.perf_counter()
     top_candidates = rerank(query, rerank_inputs, top_n=final_k)
+    t_rerank_done = time.perf_counter()
+    if timings is not None:
+        timings["reranking"] = t_rerank_done - t_rerank_start
 
     # 7) Drop chunks whose Cross-Encoder score is below the relevance
     #    threshold.  These are noisy candidates that slipped through
@@ -397,7 +392,9 @@ def retrieve(
             "score_threshold": RERANK_SCORE_THRESHOLD,
             "below_threshold_dropped": dropped_count,
             "final_count": len(results),
-            "verification_performed": True,
+            # Verification happens later in the API/LLM layer; retrieval
+            # cannot truthfully claim whether it ran.
+            "verification_performed": None,
             "results": [
                 {
                     "chunk_id": r["chunk_id"],

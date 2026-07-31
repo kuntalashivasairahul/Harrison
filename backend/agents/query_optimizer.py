@@ -35,7 +35,8 @@ from pathlib import Path
 from typing import TypedDict
 
 from dotenv import load_dotenv
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 
 # ---------------------------------------------------------------------------
 # Environment & client setup
@@ -56,6 +57,10 @@ _MAX_TOKENS = 256
 # Single-attempt timeout guard: Groq client raises on its own timeout;
 # we catch broadly so the fallback path is always reached.
 _TEMPERATURE = 0.0  # Deterministic — query rewriting must be stable.
+
+# Query optimization is optional, so keep quota recovery bounded. Each quota
+# failure advances to another non-exhausted key through ``next_client()``.
+_MAX_RETRIES = 3
 
 log = logging.getLogger(__name__)
 
@@ -162,6 +167,22 @@ _USER_TEMPLATE = "Raw query: {raw_query}"
 # ---------------------------------------------------------------------------
 
 _JSON_BLOCK_RE = re.compile(r"\{.*?\}", re.DOTALL)
+
+
+def _is_quota_error(exc: Exception) -> bool:
+    """Return True when an exception indicates an exhausted API quota."""
+    text = str(exc).lower()
+    return any(
+        marker in text
+        for marker in (
+            "429",
+            "quota",
+            "rate limit",
+            "resource exhausted",
+            "resourceexhausted",
+            "too many requests",
+        )
+    )
 
 
 def _extract_json(text: str) -> dict | None:
@@ -298,55 +319,70 @@ def optimize_query(raw_query: str) -> OptimizedQuery:
         log.warning("QueryOptimizer: received empty query — returning fallback.")
         return _build_fallback("")
 
-    try:
-        key_manager.configure_current()
-        gemini_model = genai.GenerativeModel(
-            model_name=_OPTIMIZER_MODEL,
-            system_instruction=_SYSTEM_PROMPT
-        )
-        response = gemini_model.generate_content(
-            _USER_TEMPLATE.format(raw_query=raw_query),
-            generation_config=genai.types.GenerationConfig(
-                temperature=_TEMPERATURE,
-                max_output_tokens=1024,
+    for attempt in range(_MAX_RETRIES):
+        try:
+            client = key_manager.next_client()
+            response = client.models.generate_content(
+                model=_OPTIMIZER_MODEL,
+                contents=_USER_TEMPLATE.format(raw_query=raw_query),
+                config=types.GenerateContentConfig(
+                    system_instruction=_SYSTEM_PROMPT,
+                    temperature=_TEMPERATURE,
+                    max_output_tokens=_MAX_TOKENS,
+                )
             )
-        )
 
-        raw_content: str = response.text or ""
-        payload = _extract_json(raw_content)
+            raw_content: str = response.text or ""
+            payload = _extract_json(raw_content)
 
-        if payload is None:
+            if payload is None:
+                log.warning(
+                    "QueryOptimizer: optimizer_failed=True  fallback_to_original_query=True  "
+                    "expanded_query_is_static=True  reason=unparseable_response  "
+                    "raw_content_preview=%r",
+                    raw_content[:120],
+                )
+                return _build_fallback(raw_query)
+
+            validated = _validate_payload(payload, raw_query)
+            if validated is None:
+                log.warning(
+                    "QueryOptimizer: optimizer_failed=True  fallback_to_original_query=True  "
+                    "expanded_query_is_static=True  reason=schema_validation_failed  "
+                    "payload_preview=%r",
+                    payload,
+                )
+                return _build_fallback(raw_query)
+
+            log.info(
+                "QueryOptimizer: optimizer_used=True  '%s' -> '%s'  focus=%s  complexity=%s  medical=%s",
+                raw_query,
+                validated["expanded_query"],
+                validated["focus"],
+                validated["complexity"],
+                validated["is_medical_query"],
+            )
+            return validated
+
+        except Exception as exc:  # noqa: BLE001
+            if _is_quota_error(exc):
+                key_manager.mark_exhausted()
+                if attempt >= _MAX_RETRIES - 1:
+                    break
+                log.warning(
+                    "QueryOptimizer: quota error on attempt %d/%d; marking key exhausted and retrying.",
+                    attempt + 1,
+                    _MAX_RETRIES,
+                )
+                continue
+
             log.warning(
-                "QueryOptimizer: LLM returned unparseable content: %r — "
-                "falling back to original query.",
-                raw_content[:120],
+                "QueryOptimizer: optimizer_failed=True  fallback_to_original_query=True  "
+                "expanded_query_is_static=True  reason=exception  "
+                "exc_type=%s  exc=%s",
+                type(exc).__name__,
+                exc,
             )
             return _build_fallback(raw_query)
 
-        validated = _validate_payload(payload, raw_query)
-        if validated is None:
-            log.warning(
-                "QueryOptimizer: LLM payload failed schema validation: %r — "
-                "falling back to original query.",
-                payload,
-            )
-            return _build_fallback(raw_query)
-
-        log.debug(
-            "QueryOptimizer: '%s' → '%s' (focus=%s, complexity=%s, medical=%s)",
-            raw_query,
-            validated["expanded_query"],
-            validated["focus"],
-            validated["complexity"],
-            validated["is_medical_query"],
-        )
-        return validated
-
-    except Exception as exc:  # noqa: BLE001
-        log.warning(
-            "QueryOptimizer: LLM call failed (%s: %s) — falling back to "
-            "original query.",
-            type(exc).__name__,
-            exc,
-        )
-        return _build_fallback(raw_query)
+    return _build_fallback(raw_query)

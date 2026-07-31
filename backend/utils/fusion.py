@@ -52,8 +52,12 @@ def fuse_chunks(chunks) -> str:
             continue
 
         line = f"- {txt} [p:{page}|c:{chunk_id}]"
+        projected_chars = running_chars + len(line) + (1 if parts else 0)
+        if projected_chars > SAFE_CHAR_LIMIT:
+            continue
 
         parts.append(line)
+        running_chars = projected_chars
 
     fused_context = "\n".join(parts)
     return fused_context

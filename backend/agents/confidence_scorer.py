@@ -43,12 +43,21 @@ from __future__ import annotations
 # ---------------------------------------------------------------------------
 
 # Average cross-encoder score thresholds (raw logit scale)
-_HIGH_AVG_SCORE: float = 3.5     # ≥ strong alignment across retrieved chunks
-_MED_AVG_SCORE:  float = 1.0     # [1.0, 3.5) → moderate evidence quality
+# Calibrated from observed ms-marco-MiniLM-L-6-v2 scores on Harrison text:
+# Medical textbook paragraphs score in the range −3.0 → +0.1 (not the
+# web-domain −5 → +10 range documented for the model).
+# Derived from retrieval logs:
+#   well-scoped medical queries  → avg ≈ −0.5 to −1.4, best chunk ≈ +0.05
+#   moderate queries             → avg ≈ −1.5 to −2.5
+#   noisy / off-domain queries   → avg < −2.5
+_HIGH_AVG_SCORE: float = -0.5    # ≥ strong Harrison alignment
+_MED_AVG_SCORE:  float = -2.0    # [−2.0, −0.5) → moderate evidence quality
 
-# Verification divergence: if length ratio change exceeds this, cap at "Low"
-# 0.10 = 10% character-length change between draft and verified answer
-VERIFICATION_PENALTY_THRESHOLD: float = 0.10
+# Verification divergence: if length ratio change exceeds this, cap at "Low".
+# 0.40 = 40% character-length change between draft and verified answer.
+# Minor verifier edits (< 40%) are expected and healthy; only major rewrites
+# (where the verifier discards most of the draft) signal likely hallucination.
+VERIFICATION_PENALTY_THRESHOLD: float = 0.40
 
 # Minimum chunks required to even consider "High"
 _MIN_CHUNKS_FOR_HIGH: int = 2
@@ -69,7 +78,7 @@ def calculate_confidence(
         Retrieved chunks as returned by ``retrieve()`` and
         ``route_and_sort_context()``.  Each dict may contain a ``"score"``
         key holding the Cross-Encoder relevance logit.  Chunks without a
-        ``"score"`` key are counted but contribute 0.0 to the average.
+        usable ``"score"`` are treated as insufficient evidence.
     original_answer : str
         The draft answer produced by the first LLM generation pass.
         Pass the final verified answer here when the draft is unavailable
@@ -103,7 +112,15 @@ def calculate_confidence(
         return "Low"
 
     # ── Signal 1: Average cross-encoder score across all chunks ──────────
-    scores = [float(c.get("score", 0.0)) for c in chunks]
+    scores = []
+    for chunk in chunks:
+        try:
+            score = chunk.get("score")
+            if score is None:
+                return "Low"
+            scores.append(float(score))
+        except (AttributeError, TypeError, ValueError):
+            return "Low"
     avg_score: float = sum(scores) / len(scores)
 
     # ── Signal 2: Verification divergence ────────────────────────────────

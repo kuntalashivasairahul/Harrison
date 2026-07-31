@@ -11,117 +11,17 @@
 
 ## 1. End-to-End Pipeline
 
-The complete request lifecycle for a single `/ask` call:
+The request lifecycle for `/ask` is:
 
-```
-┌──────────────────────────────────────────────────────────────────────────┐
-│                          POST /ask  (FastAPI)                            │
-│                    { query: str, mode: "qa"|"smart_summary" }            │
-└─────────────────────────────────┬────────────────────────────────────────┘
-                                  │
-                    ┌─────────────▼──────────────┐
-                    │      1. Query Expansion      │
-                    │  expand_query(max_queries=4) │
-                    │  → always includes original  │
-                    │  → up to 3 rule-based paraphrases│
-                    └─────────────┬──────────────┘
-                                  │  List[str]  (≤ 4 queries)
-                    ┌─────────────▼──────────────┐
-                    │   2. Hybrid Retrieval (×N)  │
-                    │   FAISS (dense ANN, k=30)   │
-                    │      +                      │
-                    │   BM25Okapi (lexical, k=30) │
-                    │   — per expanded query —    │
-                    └─────────────┬──────────────┘
-                                  │  List[Dict]  (raw candidates)
-                    ┌─────────────▼──────────────┐
-                    │   3. RRF Fusion  (K = 60)   │
-                    │  Merge + deduplicate by     │
-                    │  chunk_id across all queries │
-                    │  RRF score = Σ 1/(K+rank)   │
-                    └─────────────┬──────────────┘
-                                  │  merged List[Dict]
-                    ┌─────────────▼──────────────┐
-                    │  4. Low-Value Chunk Filter  │
-                    │  Drop: figure captions,     │
-                    │  references, <20 char lines │
-                    └─────────────┬──────────────┘
-                                  │
-                    ┌─────────────▼──────────────┐
-                    │  5. Neighbor Chunk Expansion│
-                    │  For each top chunk, add    │
-                    │  chunk_id ± 1 (if not duped)│
-                    │  Cap at rerank_pool size    │
-                    └─────────────┬──────────────┘
-                                  │  rerank pool (≤ 24 chunks)
-                    ┌─────────────▼──────────────┐
-                    │  6. Cross-Encoder Reranking │
-                    │  ms-marco-MiniLM-L-6-v2     │
-                    │  Scores: raw logits          │
-                    │  top_n = final_k (6 or 12)  │
-                    └─────────────┬──────────────┘
-                                  │
-                    ┌─────────────▼──────────────┐
-                    │  7. Hard Score Filter ⚠️    │
-                    │  RERANK_SCORE_THRESHOLD=-2.0│
-                    │  Drop chunks below threshold │
-                    │  → IMMUTABLE SAFETY GATE ←  │
-                    └─────────────┬──────────────┘
-                                  │  final_chunks: List[Dict]
-                    ┌─────────────▼──────────────┐
-                    │   8. Context Fusion         │
-                    │   fuse_context(chunks)      │
-                    │   Assembles fused_context   │
-                    │   string for LLM prompt     │
-                    └─────────────┬──────────────┘
-                                  │
-                    ┌─────────────▼──────────────┐
-                    │  9. Evidence Extraction     │
-                    │  extract_evidence(chunks)   │
-                    │  → EVIDENCE: <stmt> [p:NNN] │
-                    │  extract_sources(chunks)    │
-                    │  → ["p.142", "p.512", ...]  │
-                    └─────────────┬──────────────┘
-                                  │
-                    ┌─────────────▼──────────────┐
-                    │  10. Page URL Resolution    │
-                    │  resolve_page_urls(sources) │
-                    │  → thumbnail_url + full_url │
-                    │  → IMMUTABLE: visual ground │
-                    └─────────────┬──────────────┘
-                                  │
-                    ┌─────────────▼──────────────┐
-                    │  11. LLM Generation (Groq)  │
-                    │  ask_llm(context, question, │
-                    │          mode, evidence)    │
-                    │  model: llama-3.3-70b       │
-                    │  temp: 0.1 (ss) / 0.2 (qa) │
-                    └─────────────┬──────────────┘
-                                  │  draft_answer: str
-                    ┌─────────────▼──────────────┐
-                    │  12. Conditional Verify ⚠️  │
-                    │  verify_answer() — ALWAYS   │
-                    │  runs unless REFUSAL_STR    │
-                    │  temp=0.0, grounded rewrite │
-                    │  → IMMUTABLE SAFETY GATE ←  │
-                    └─────────────┬──────────────┘
-                                  │  verified_answer: str
-                    ┌─────────────▼──────────────┐
-                    │  13. Confidence Scoring     │
-                    │  calculate_confidence(      │
-                    │    top_reranker_score,      │
-                    │    evidence_count,          │
-                    │    was_verified)            │
-                    │  → "High" | "Medium" | "Low"│
-                    └─────────────┬──────────────┘
-                                  │
-                    ┌─────────────▼──────────────┐
-                    │   14. Final JSON Response   │
-                    │   QueryResponse schema:     │
-                    │   { answer, confidence,     │
-                    │     sources, visual_context }│
-                    └────────────────────────────┘
-```
+1. `optimize_query()` classifies the query, rejects non-medical requests, expands the search query, and labels complexity.
+2. The API embeds the search query with `BAAI/bge-m3` and checks the semantic cache against exact runtime metadata.
+3. A cache miss runs hybrid FAISS/BM25 retrieval, RRF fusion (`RRF_K=60`), neighbor expansion, cross-encoder reranking, and the `RERANK_SCORE_THRESHOLD=-3.0` hard filter.
+4. `route_and_sort_context()` deduplicates and page-orders chunks; `fuse_context()` constructs the prompt context within its fixed 12,000-character limit.
+5. Evidence and source labels are extracted from the retrieved chunks.
+6. `ask_llm()` calls Gemini through `google-genai`. `KeyManager` uses `GEMINI_API_KEY_1` through `_10` (or `GEMINI_API_KEY` as slot 1), rotates clients round-robin, and marks quota-exhausted keys for the process lifetime.
+7. Unless `disable_verifier` is requested, `verify_answer()` performs a grounded Gemini rewrite at temperature `0.0`. A complete verified response is the only response eligible for semantic-cache persistence.
+8. `backend/agents/confidence_scorer.py` scores the final response from average cross-encoder relevance and draft-to-verified length divergence; return-path and truncation caps are then applied by the API.
+9. Source labels are resolved into page-image URLs and returned with timing data in `QueryResponse`.
 
 ---
 
@@ -134,12 +34,14 @@ renamed, removed, or re-typed without a full migration plan.
 class QueryRequest(BaseModel):
     query: str
     mode: Literal["qa", "smart_summary"] = "smart_summary"
+    disable_verifier: bool = False
 
 class QueryResponse(BaseModel):
     answer:         str                   # Verified LLM answer
     confidence:     str                   # "High" | "Medium" | "Low"
     sources:        List[str]             # e.g. ["p.142", "p.512"]
     visual_context: List[Dict[str, str]]  # [{page_label, thumbnail_url, full_url}]
+    timings:        Dict[str, float]      # stage durations in seconds
 ```
 
 **Immutability rules:**
@@ -163,13 +65,13 @@ Harrison/                              ← Project root
 │   │   ├── rag.py                     ← Core retrieval pipeline:
 │   │   │                                expand_query(), _hybrid_candidates(),
 │   │   │                                _pretrim_for_rerank(), retrieve()
-│   │   │                                RERANK_SCORE_THRESHOLD defined here
+│   │   │                                Uses RERANK_SCORE_THRESHOLD from config.py
 │   │   ├── rerank.py                  ← CrossEncoder wrapper: rerank(), top_score()
 │   │   └── embeddings.py              ← embed_text() — FAISS query embedding
 │   │
 │   ├── llm/
 │   │   └── llm.py                     ← ask_llm(), verify_answer()
-│   │                                    BASE_QA_PROMPT, SMART_SUMMARY_PROMPT defined here
+│   │                                    Gemini key management, prompts, and verification
 │   │                                    REFUSAL_STR sentinel defined here
 │   │
 │   ├── processing/
@@ -180,10 +82,12 @@ Harrison/                              ← Project root
 │   │   └── page_resolver.py           ← resolve_page_urls()
 │   │                                    URL constructor only; no disk I/O
 │   │
-│   ├── utils/
-│   │   ├── fusion.py                  ← fuse_context(), clean_text()
-│   │   └── scoring.py                 ← calculate_confidence()
+│   ├── agents/
+│   │   └── confidence_scorer.py       ← calculate_confidence()
 │   │                                    Pure function; no I/O
+│   │
+│   ├── utils/
+│   │   └── fusion.py                  ← fuse_context(), clean_text()
 │   │
 │   ├── config.py                      ← Global path & model constants
 │   ├── requirements.txt               ← Python dependencies
@@ -218,7 +122,7 @@ api/main.py
     ├── processing/evidence.py    (extract_evidence, extract_sources)
     ├── llm/llm.py                (ask_llm, REFUSAL_STR)
     ├── retrieval/rerank.py       (top_score)
-    ├── utils/scoring.py          (calculate_confidence)
+    ├── agents/confidence_scorer.py (calculate_confidence)
     └── rendering/page_resolver.py (resolve_page_urls)
 
 retrieval/rag.py
@@ -233,7 +137,7 @@ retrieval/rerank.py
     └── sentence_transformers     (CrossEncoder)
 
 llm/llm.py
-    └── groq                      (Groq client)
+    └── google.genai              (Gemini client and types)
 
 processing/evidence.py
     └── utils/fusion.py           (clean_text)
@@ -260,20 +164,20 @@ appear in only one index receive only one term.
 
 | Condition                                                      | Label      |
 |----------------------------------------------------------------|------------|
-| `was_verified == False`                                        | **Low**    |
-| `top_reranker_score < 1.0`                                     | **Low**    |
-| `top_reranker_score ≥ 5.0 AND evidence_count ≥ 2`             | **High**   |
-| Everything else                                                | **Medium** |
+| No retrieved chunks, unusable scores, or average score `< -2.0` | **Low**  |
+| Draft-to-verified length divergence `> 0.40`                    | **Low**  |
+| Average score `>= -0.5` and at least two chunks                 | **High** |
+| Everything else                                                 | **Medium** |
 
 ### 5.3 Hard Filter Threshold
 
 ```python
-RERANK_SCORE_THRESHOLD = -2.0  # raw ms-marco-MiniLM logit
+RERANK_SCORE_THRESHOLD = -3.0  # raw ms-marco-MiniLM logit
 ```
 
 Chunks scoring below this value are dropped **after** reranking but **before**
-context fusion. This is not configurable at the API layer — it is a safety
-constant in `backend/retrieval/rag.py`.
+context fusion. It is defined in `backend/config.py` and used by
+`backend/retrieval/rag.py`; it is not configurable at the API layer.
 
 ---
 
@@ -309,10 +213,10 @@ draft_answer  ──→  verify_answer(draft, context, mode, model)  ──→  
 - Called with `temperature=0.0` (deterministic).
 - Instruction: keep supported claims, rewrite partial claims, remove
   unsupported claims. **Never invent** new page numbers.
-- Skipped **only** when `ask_llm()` returns `REFUSAL_STR` or an LLM error
-  sentinel — both of which are already safe non-answers.
-- The `was_verified` flag in `calculate_confidence()` is set to `True` when
-  the answer is neither `REFUSAL_STR` nor an `"LLM call failed:"` prefix.
+- Bypassed when the request sets `disable_verifier=true`; otherwise the
+  verifier retries quota failures using the Gemini key pool.
+- A complete verified answer is cacheable. Draft fallbacks, disabled
+  verification, and truncated responses are not persisted in the semantic cache.
 
 ---
 

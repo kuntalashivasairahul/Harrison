@@ -24,7 +24,7 @@ Requirements
 - The HarrisonGPT server must be running at API_BASE_URL (default:
   http://127.0.0.1:8000).
 - GEMINI_API_KEY (or GEMINI_API_KEY_1, _2, …) must be set in backend/.env.
-- Only stdlib + google-generativeai + python-dotenv are used.
+- Only stdlib + google-genai + python-dotenv are used.
 """
 
 from __future__ import annotations
@@ -51,8 +51,9 @@ sys.path.insert(0, str(_ROOT))
 load_dotenv(_ROOT / "backend" / ".env")
 
 # Import Gemini KeyManager and dynamic models from the centralized llm module.
-import google.generativeai as genai
-from backend.llm.llm import key_manager, PROD_MODEL, BACKUP_MODEL
+from google.genai import types
+
+from backend.llm.llm import key_manager, PROD_MODEL
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -81,8 +82,9 @@ INTER_QUERY_SLEEP_S: int = 2
 # Retry / back-off configuration
 # ---------------------------------------------------------------------------
 # Both the /ask pipeline call and the Gemini judge call can hit rate limits
-# (HTTP 429).  The wrapper below retries with exponential back-off + jitter
-# and uses the KeyManager to rotate API keys on quota errors.
+# (HTTP 429).  The wrapper below retries with exponential back-off + jitter.
+# Direct Gemini judge calls may pass a callback to mark the current local key
+# exhausted; /ask retries leave key state to the running API server.
 
 RETRY_MAX_ATTEMPTS: int   = 5       # total attempts (1 original + 4 retries)
 RETRY_BASE_DELAY_S: float = 4.0    # seconds before first retry
@@ -109,7 +111,7 @@ def _parse_retry_after(exc: Exception) -> Optional[float]:
     return None
 
 
-def _with_retry(fn, *args, label: str = "call", **kwargs):
+def _with_retry(fn, *args, label: str = "call", on_rate_limit=None, **kwargs):
     """
     Call ``fn(*args, **kwargs)`` up to RETRY_MAX_ATTEMPTS times.
 
@@ -117,7 +119,8 @@ def _with_retry(fn, *args, label: str = "call", **kwargs):
       1. Parse the Retry-After duration from the error message.
       2. If found, sleep exactly that long (+ 2s safety margin).
       3. If not found, use exponential back-off with ±10% jitter.
-      4. Rotate to the next Gemini API key via KeyManager.
+      4. Optionally notify the caller so direct Gemini calls can mark a key
+         exhausted before retrying.
 
     Any non-rate-limit exception propagates immediately (fail fast).
     Returns the result of the first successful call.
@@ -145,15 +148,15 @@ def _with_retry(fn, *args, label: str = "call", **kwargs):
             if attempt == RETRY_MAX_ATTEMPTS:
                 break  # exhausted — fall through to raise
 
-            # Rotate API key before retrying
-            key_manager.rotate()
+            if on_rate_limit is not None:
+                on_rate_limit()
 
             if retry_after is not None:
                 wait = retry_after + 2.0  # small safety margin
                 print(
                     f"\n  {YELLOW}⏳ Rate limit hit on {label} "
                     f"(attempt {attempt}/{RETRY_MAX_ATTEMPTS}). "
-                    f"Gemini says wait {retry_after:.0f}s — sleeping {wait:.0f}s, rotating key…{RESET}",
+                    f"Gemini says wait {retry_after:.0f}s — sleeping {wait:.0f}s…{RESET}",
                     flush=True,
                 )
             else:
@@ -163,7 +166,7 @@ def _with_retry(fn, *args, label: str = "call", **kwargs):
                 print(
                     f"\n  {YELLOW}⏳ Rate limit hit on {label} "
                     f"(attempt {attempt}/{RETRY_MAX_ATTEMPTS}). "
-                    f"Back-off {wait:.1f}s, rotating key…{RESET}",
+                    f"Back-off {wait:.1f}s…{RESET}",
                     flush=True,
                 )
                 delay = min(delay * RETRY_BACKOFF_FACTOR, RETRY_MAX_DELAY_S)
@@ -365,21 +368,23 @@ def judge_answer(query: str, expected_focus: str, answer: str) -> dict:
     )
 
     def _call_judge():
-        key_manager.configure_current()
-        gemini_model = genai.GenerativeModel(
-            model_name=JUDGE_MODEL,
-            system_instruction=JUDGE_SYSTEM,
-        )
-        return gemini_model.generate_content(
-            user_msg,
-            generation_config=genai.types.GenerationConfig(
+        client = key_manager.next_client()
+        return client.models.generate_content(
+            model=JUDGE_MODEL,
+            contents=user_msg,
+            config=types.GenerateContentConfig(
+                system_instruction=JUDGE_SYSTEM,
                 temperature=0.0,   # deterministic grading
                 max_output_tokens=256,
             ),
         )
 
     try:
-        resp = _with_retry(_call_judge, label=f"judge ({JUDGE_MODEL})")
+        resp = _with_retry(
+            _call_judge,
+            label=f"judge ({JUDGE_MODEL})",
+            on_rate_limit=key_manager.mark_exhausted,
+        )
         raw = (resp.text or "").strip()
 
         payload = _extract_json(raw)

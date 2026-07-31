@@ -26,8 +26,8 @@ This script parses a Markdown source file with surgical precision:
      token boundary (default 512 chars) with a 64-char overlap so
      sentences are never cut at arbitrary byte positions.
 
-  4. **Dense embedding** — SentenceTransformers('all-MiniLM-L6-v2')
-     produces 384-dim L2-normalised vectors identical to the live
+  4. **Dense embedding** — the configured live embedding model
+     produces L2-normalised vectors identical to the live
      pipeline, ensuring staging results are directly comparable.
      Automatically uses Apple Silicon MPS (Metal GPU) when available,
      falling back to CPU on non-Apple hardware.
@@ -93,6 +93,7 @@ log = logging.getLogger("ingest_tables")
 # ---------------------------------------------------------------------------
 
 _ROOT          = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_ROOT))
 DEFAULT_SOURCE = _ROOT / "data" / "harrison.md"
 STAGING_DIR    = _ROOT / "artifacts" / "vectorstore_staging"
 INDEX_PATH     = STAGING_DIR / "table_index.faiss"
@@ -102,12 +103,7 @@ CHUNKS_PATH    = STAGING_DIR / "table_chunks.json"
 PROD_INDEX  = _ROOT / "artifacts" / "vectorstore" / "index.faiss"
 PROD_CHUNKS = _ROOT / "artifacts" / "vectorstore" / "chunks.json"
 
-# ---------------------------------------------------------------------------
-# Embedding model (matches the live pipeline)
-# ---------------------------------------------------------------------------
-
-EMBEDDING_MODEL = "all-MiniLM-L6-v2"
-EMBEDDING_DIM   = 384
+from backend.config import EMBEDDING_DIM, EMBEDDING_MODEL
 
 # ---------------------------------------------------------------------------
 # Chunking constants
@@ -495,9 +491,9 @@ def embed_chunks(
     batch_size: int = DEFAULT_BATCH_SIZE,
 ) -> np.ndarray:
     """
-    Generate L2-normalised 384-dim embeddings for all chunks.
+    Generate L2-normalised embeddings for all chunks.
 
-    Returns an (N, 384) float32 numpy array.
+    Returns an (N, EMBEDDING_DIM) float32 numpy array.
     """
     texts = [c.text for c in chunks]
     log.info("Embedding %d chunks in batches of %d…", len(texts), batch_size)
@@ -673,7 +669,7 @@ def main() -> None:
 
     # ── 3. Load embedding model (MPS-accelerated on Apple Silicon) ──────
     # Check device priority: MPS (Apple Metal GPU) > CPU.
-    # MPS delivers 5-10x throughput over CPU for the all-MiniLM-L6-v2 model
+    # MPS can deliver higher throughput for supported SentenceTransformer models
     # on M-series chips.  Falls back to CPU silently on non-Apple hardware.
     if torch.backends.mps.is_available():
         _device = "mps"
@@ -685,7 +681,17 @@ def main() -> None:
         EMBEDDING_MODEL, _device,
     )
     model = SentenceTransformer(EMBEDDING_MODEL, device=_device)
-    log.info("Model loaded. Device: %s", _device.upper())
+    model_dim = (
+        model.get_embedding_dimension()
+        if hasattr(model, "get_embedding_dimension")
+        else model.get_sentence_embedding_dimension()
+    )
+    if model_dim != EMBEDDING_DIM:
+        raise RuntimeError(
+            f"Configured embedding dim mismatch: model emits {model_dim}, "
+            f"backend.config.EMBEDDING_DIM={EMBEDDING_DIM}"
+        )
+    log.info("Model loaded. Device: %s, dim=%d", _device.upper(), model_dim)
 
     # ── 4. Embed ──────────────────────────────────────────────────────────
     embeddings = embed_chunks(chunks, model, batch_size=args.batch_size)
