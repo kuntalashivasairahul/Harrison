@@ -290,6 +290,31 @@ class TestAskLlmReturnPaths(unittest.TestCase):
         self.assertTrue(was_truncated)
         self.assertIn("⚠️", answer)
 
+    def test_verifier_retry_uses_the_configured_qa_token_limit(self):
+        draft = _make_response("Complete draft answer")
+        truncated = _make_truncated_response("Partial verified")
+        verified = _make_response("Complete verified answer")
+        responses = iter((draft, truncated, verified))
+        client = MagicMock()
+        client.models.generate_content.side_effect = lambda **_kwargs: next(responses)
+
+        with patch("backend.llm.llm.key_manager") as mock_km, \
+             patch("backend.llm.llm.types") as mock_types:
+            mock_km.next_client.return_value = client
+            mock_types.GenerateContentConfig.side_effect = _FakeConfig
+            from backend.llm.llm import QA_MAX_TOKENS, ask_llm
+            answer, _, was_truncated, path = ask_llm(
+                fused_context="A" * 100,
+                question="test",
+                mode="qa",
+            )
+
+        retry_config = client.models.generate_content.call_args_list[2].kwargs["config"]
+        self.assertEqual(retry_config.max_output_tokens, QA_MAX_TOKENS)
+        self.assertEqual(answer, "Complete verified answer")
+        self.assertFalse(was_truncated)
+        self.assertEqual(path, "verified")
+
     def test_draft_fallback_when_verifier_throws_exception(self):
         """Draft OK + verifier exception → returned_path='draft_fallback' (NOT 'verified')."""
         draft = _make_response("Complete draft answer")
@@ -425,8 +450,8 @@ class TestOptimizerFallback(unittest.TestCase):
 
     def test_optimizer_exception_returns_fallback(self):
         """Full optimize_query with mocked LLM exception → safe fallback."""
-        with patch("backend.agents.query_optimizer.key_manager") as mock_km:
-            mock_km.make_client.side_effect = RuntimeError("connection error")
+        with patch("backend.agents.query_optimizer.llm_router") as mock_router:
+            mock_router.optimize.side_effect = RuntimeError("connection error")
             from backend.agents.query_optimizer import optimize_query
             result = optimize_query("test medical query")
         self.assertFalse(result["optimizer_used"])

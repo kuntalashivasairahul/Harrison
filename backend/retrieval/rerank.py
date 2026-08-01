@@ -21,6 +21,11 @@ def _get_reranker():
                 _reranker = CrossEncoder(_RERANK_MODEL)
     return _reranker
 
+
+def warmup_reranker() -> None:
+    """Load the cross-encoder during application startup, not the first ask."""
+    _get_reranker()
+
 def rerank(query: str, candidates: List[Dict], top_n: int = 6) -> List[Dict]:
     """
     candidates: list of dicts with keys {chunk_id, page, text, distance(optional)}

@@ -24,6 +24,14 @@ class TestRetrievalSafety(unittest.TestCase):
         self.assertEqual(rag.expand_query(query), expected)
         self.assertEqual(rag.expand_query(query), expected)
 
+    def test_expand_query_does_not_wrap_an_existing_question(self):
+        query = "What are the diagnostic criteria for diabetic ketoacidosis?"
+        variants = rag.expand_query(query)
+
+        self.assertEqual(variants[0], query)
+        self.assertNotIn(f"What is {query}?", variants)
+        self.assertEqual(len(variants), 4)
+
     def test_bm25_zero_score_documents_are_not_candidates(self):
         chunks = [
             {"page": 1, "text": "alpha context"},

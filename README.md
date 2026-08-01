@@ -6,7 +6,7 @@ HarrisonGPT is a production-grade, high-recall **Medical Retrieval-Augmented Gen
 
 ## 🚀 Key Features
 
-* **Query Optimizer Agent:** Performs pre-retrieval scope checks (rejecting off-topic queries), expands medical acronyms (e.g., "MI" $\rightarrow$ "myocardial infarction"), and dynamically adapts retrieval depth based on question complexity.
+* **Stage-Aware LLM Routing:** Uses an approved local registry: Groq optimizes queries when explicitly enabled, Gemini remains the only draft and verification provider, and all provider fallback decisions are logged.
 * **Low-Latency Semantic Caching:** Utilizes a disk-persistent semantic cache (`artifacts/semantic_cache.json`) to serve clinically equivalent queries instantly ($\ge 0.95$ Cosine Similarity) in under ~1ms.
 * **Hybrid Retrieval Pipeline:** Merges FAISS dense search using `BAAI/bge-m3` (1024 dimensions) with BM25Okapi sparse lexical search via Reciprocal Rank Fusion (RRF), alongside local context neighbor chunk expansion.
 * **Cross-Encoder Rerank Filtering:** Scores chunks via an `ms-marco-MiniLM-L-6-v2` cross-encoder, filtering out noisy passages scoring below `-3.0`.
@@ -20,7 +20,7 @@ HarrisonGPT is a production-grade, high-recall **Medical Retrieval-Augmented Gen
 * **API & Serving:** FastAPI, Uvicorn, Pydantic, Python-dotenv
 * **Vector & Lexical Search:** FAISS (CPU), Rank-BM25
 * **AI Embeddings & Reranking:** SentenceTransformers (`BAAI/bge-m3`, 1024 dimensions, and `ms-marco-MiniLM-L-6-v2`)
-* **Large Language Models:** Google Gen AI SDK (`google-genai`) with dynamic Gemini model selection and key rotation.
+* **Large Language Models:** Google Gen AI SDK (`google-genai`) for grounded answers and Groq for the optional query-optimizer route.
 
 ---
 
@@ -49,9 +49,10 @@ Create a `.env` file inside the `backend/` directory:
 ```env
 GEMINI_API_KEY="your-google-ai-api-key"
 
-# Optional rotation pool; numbered keys take precedence for their slots.
+# Optional rotation pool; the main key and numbered keys are all distinct.
 # GEMINI_API_KEY_1="..."
 # GEMINI_API_KEY_2="..."
+# ... through GEMINI_API_KEY_10
 
 # Optional customizations
 SMART_SUMMARY_MAX_TOKENS=3000
@@ -60,6 +61,16 @@ SMART_SUMMARY_CONTEXT_CHAR_LIMIT=12000
 SMART_SUMMARY_K=48
 SMART_SUMMARY_FINAL_K=12
 SMART_SUMMARY_RERANK_POOL=16
+# Temporary cooldown applied to a Gemini key after a 429 response.
+GEMINI_RATE_LIMIT_COOLDOWN_SECONDS=60
+
+# Stage 1 Groq optimizer. Disabled unless both variables are set.
+GROQ_ENABLED=false
+GROQ_API_KEY=""
+GROQ_OPTIMIZER_MODEL=llama-3.1-8b-instant
+LLM_OPTIMIZER_DEADLINE_SECONDS=8
+LLM_DRAFT_DEADLINE_SECONDS=30
+LLM_VERIFIER_DEADLINE_SECONDS=30
 ```
 
 ---
@@ -117,7 +128,9 @@ The server will start at `http://127.0.0.1:8000`.
     "embedding_dim": 1024,
     "embedding_index_dim_match": true,
     "gemini_key_present": true,
-    "gemini_key_count": 1
+    "gemini_key_count": 1,
+    "gemini_available_key_count": 1,
+    "llm_providers": []
   }
   ```
 
@@ -145,3 +158,12 @@ generated from available evidence rather than padded with empty sections.
 the current fusion implementation applies its own fixed `SAFE_CHAR_LIMIT` of
 `12000` characters to every mode. Changing the environment variable alone
 does not currently change the fused-context budget.
+
+### Stage 1 Provider Policy
+
+`backend/llm/model_registry.json` is the only approved-provider allowlist.
+Groq is used only for query optimization, then Gemini Flash-Lite is attempted,
+then the optimizer returns its deterministic local fallback. Gemini remains the
+sole draft and verifier provider. OpenRouter, OmniRoute, Cerebras, Mistral,
+NVIDIA NIM, and OpenCode are not enabled in Stage 1. Do not route textbook
+context through generic gateway auto-routing or context compression.

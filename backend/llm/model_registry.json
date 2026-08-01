@@ -1,0 +1,41 @@
+{
+  "version": "v1",
+  "deployments": [
+    {
+      "alias": "gemini-primary",
+      "provider": "gemini",
+      "model": "dynamic-prod",
+      "enabled": true,
+      "stages": ["draft", "verifier"],
+      "max_input_tokens": 12000,
+      "max_output_tokens": 3000,
+      "timeout_seconds": 30,
+      "privacy": "configured_external_provider",
+      "priority": 10
+    },
+    {
+      "alias": "gemini-optimizer-fallback",
+      "provider": "gemini",
+      "model": "dynamic-backup",
+      "enabled": true,
+      "stages": ["optimizer"],
+      "max_input_tokens": 4000,
+      "max_output_tokens": 256,
+      "timeout_seconds": 8,
+      "privacy": "configured_external_provider",
+      "priority": 20
+    },
+    {
+      "alias": "groq-optimizer",
+      "provider": "groq",
+      "model": "llama-3.1-8b-instant",
+      "enabled": true,
+      "stages": ["optimizer"],
+      "max_input_tokens": 4000,
+      "max_output_tokens": 256,
+      "timeout_seconds": 5,
+      "privacy": "configured_external_provider",
+      "priority": 10
+    }
+  ]
+}

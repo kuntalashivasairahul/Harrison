@@ -383,7 +383,7 @@ def judge_answer(query: str, expected_focus: str, answer: str) -> dict:
         resp = _with_retry(
             _call_judge,
             label=f"judge ({JUDGE_MODEL})",
-            on_rate_limit=key_manager.mark_exhausted,
+            on_rate_limit=key_manager.mark_rate_limited,
         )
         raw = (resp.text or "").strip()
 

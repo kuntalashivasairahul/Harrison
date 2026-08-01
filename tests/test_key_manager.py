@@ -2,7 +2,7 @@
 tests/test_key_manager.py
 ==========================
 Unit tests for the refactored KeyManager:
-  - Explicit 10-slot loading
+  - Main key plus explicit 10-slot loading
   - Round-robin via next_client()
   - Exhaustion tracking via mark_exhausted()
   - rotate() skips exhausted keys
@@ -29,6 +29,7 @@ def _make_km(*keys: str):
     km._keys = list(keys)
     km._current_idx = -1
     km._exhausted = set()
+    km._rate_limited_until = {}
     return km
 
 
@@ -37,7 +38,7 @@ def _make_km(*keys: str):
 # ---------------------------------------------------------------------------
 
 class TestKeyLoading(unittest.TestCase):
-    """GEMINI_API_KEY_1..10 loading + alias for bare GEMINI_API_KEY."""
+    """Main Gemini key plus deterministic GEMINI_API_KEY_1..10 loading."""
 
     def test_explicit_slots_loaded_in_order(self):
         env = {
@@ -66,7 +67,7 @@ class TestKeyLoading(unittest.TestCase):
                     km._keys.append(val)
         self.assertEqual(km._keys, ["key-a", "key-b", "key-c"])
 
-    def test_bare_key_used_as_slot1_alias(self):
+    def test_main_key_is_loaded_before_numbered_keys(self):
         env = {"GEMINI_API_KEY": "bare-key"}
         with patch.dict("os.environ", env, clear=True):
             from backend.llm.llm import KeyManager
@@ -76,13 +77,20 @@ class TestKeyLoading(unittest.TestCase):
             km._keys = []
             km._current_idx = -1
             km._exhausted = set()
+            main_key = os.getenv("GEMINI_API_KEY", "").strip()
+            if main_key:
+                km._keys.append(main_key)
             for slot in range(1, KeyManager.TOTAL_SLOTS + 1):
                 val = os.getenv(f"GEMINI_API_KEY_{slot}", "").strip()
-                if not val and slot == 1:
-                    val = os.getenv("GEMINI_API_KEY", "").strip()
                 if val:
                     km._keys.append(val)
         self.assertEqual(km._keys, ["bare-key"])
+
+    def test_main_key_and_slot_one_are_distinct(self):
+        with patch.dict("os.environ", {"GEMINI_API_KEY": "main", "GEMINI_API_KEY_1": "slot-one"}, clear=True):
+            from backend.llm.llm import KeyManager
+            km = KeyManager()
+        self.assertEqual(km._keys, ["main", "slot-one"])
 
     def test_total_slots_is_10(self):
         from backend.llm.llm import KeyManager
@@ -102,10 +110,11 @@ class TestKeyLoading(unittest.TestCase):
             km._keys = []
             km._current_idx = -1
             km._exhausted = set()
+            main_key = os.getenv("GEMINI_API_KEY", "").strip()
+            if main_key:
+                km._keys.append(main_key)
             for slot in range(1, KeyManager.TOTAL_SLOTS + 1):
                 val = os.getenv(f"GEMINI_API_KEY_{slot}", "").strip()
-                if not val and slot == 1:
-                    val = os.getenv("GEMINI_API_KEY", "").strip()
                 if val:
                     km._keys.append(val)
         self.assertEqual(len(km._keys), 2)
@@ -199,6 +208,24 @@ class TestExhaustionTracking(unittest.TestCase):
         km = _make_km("k0")
         km.mark_exhausted()         # _current_idx = -1, should be a no-op
         self.assertEqual(len(km._exhausted), 0)
+
+
+class TestRateLimitCooldown(unittest.TestCase):
+    """A transient 429 must not permanently deplete the key pool."""
+
+    def test_rate_limited_key_is_skipped_then_recovers(self):
+        km = _make_km("k0", "k1")
+        with patch("backend.llm.llm.genai.Client", side_effect=lambda api_key: MagicMock(api_key=api_key)):
+            first = km.next_client()
+            km.mark_rate_limited(cooldown_seconds=60)
+            second = km.next_client()
+
+        self.assertEqual(first.api_key, "k0")
+        self.assertEqual(second.api_key, "k1")
+        self.assertEqual(km.available_key_count, 1)
+
+        km._rate_limited_until[0] = 0.0
+        self.assertEqual(km.available_key_count, 2)
 
 
 class TestRotate(unittest.TestCase):

@@ -21,8 +21,8 @@ Guarantees (CODING_RULES.md §1, §2, §3)
 - No medical claims are invented — the agent only rewrites the *query*, not
   the *answer*.
 - No imports from ``retrieval/``, ``llm/``, ``api/``, or ``rendering/``.
-  This module depends only on ``groq``, the standard library, and
-  ``backend/.env``.
+This module delegates optional LLM work to the approved stage router and
+always retains a deterministic local fallback.
 """
 
 from __future__ import annotations
@@ -35,8 +35,6 @@ from pathlib import Path
 from typing import TypedDict
 
 from dotenv import load_dotenv
-from google import genai
-from google.genai import types
 
 # ---------------------------------------------------------------------------
 # Environment & client setup
@@ -44,23 +42,13 @@ from google.genai import types
 
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
-# API key configuration is handled centrally by KeyManager in llm.py.
-# Import here so the optimizer uses the same rotation pool.
-from backend.llm.llm import key_manager, BACKUP_MODEL
-
-# Fast, low-latency model — resolved dynamically from Google's live API.
-_OPTIMIZER_MODEL = BACKUP_MODEL
+from backend.llm.contracts import LLMRequest, LLMStage
+from backend.llm.llm import llm_router
 
 # Keep expansion tokens tight — we only need a small JSON object.
 _MAX_TOKENS = 256
 
-# Single-attempt timeout guard: Groq client raises on its own timeout;
-# we catch broadly so the fallback path is always reached.
 _TEMPERATURE = 0.0  # Deterministic — query rewriting must be stable.
-
-# Query optimization is optional, so keep quota recovery bounded. Each quota
-# failure advances to another non-exhausted key through ``next_client()``.
-_MAX_RETRIES = 3
 
 log = logging.getLogger(__name__)
 
@@ -319,70 +307,29 @@ def optimize_query(raw_query: str) -> OptimizedQuery:
         log.warning("QueryOptimizer: received empty query — returning fallback.")
         return _build_fallback("")
 
-    for attempt in range(_MAX_RETRIES):
-        try:
-            client = key_manager.next_client()
-            response = client.models.generate_content(
-                model=_OPTIMIZER_MODEL,
-                contents=_USER_TEMPLATE.format(raw_query=raw_query),
-                config=types.GenerateContentConfig(
-                    system_instruction=_SYSTEM_PROMPT,
-                    temperature=_TEMPERATURE,
-                    max_output_tokens=_MAX_TOKENS,
-                )
+    try:
+        result = llm_router.optimize(
+            LLMRequest(
+                prompt=_USER_TEMPLATE.format(raw_query=raw_query),
+                system_instruction=_SYSTEM_PROMPT,
+                model_alias="optimizer",
+                temperature=_TEMPERATURE,
+                max_output_tokens=_MAX_TOKENS,
+                deadline_seconds=float(os.getenv("LLM_OPTIMIZER_DEADLINE_SECONDS", "8")),
+                stage=LLMStage.OPTIMIZER,
             )
-
-            raw_content: str = response.text or ""
-            payload = _extract_json(raw_content)
-
-            if payload is None:
-                log.warning(
-                    "QueryOptimizer: optimizer_failed=True  fallback_to_original_query=True  "
-                    "expanded_query_is_static=True  reason=unparseable_response  "
-                    "raw_content_preview=%r",
-                    raw_content[:120],
-                )
-                return _build_fallback(raw_query)
-
-            validated = _validate_payload(payload, raw_query)
-            if validated is None:
-                log.warning(
-                    "QueryOptimizer: optimizer_failed=True  fallback_to_original_query=True  "
-                    "expanded_query_is_static=True  reason=schema_validation_failed  "
-                    "payload_preview=%r",
-                    payload,
-                )
-                return _build_fallback(raw_query)
-
-            log.info(
-                "QueryOptimizer: optimizer_used=True  '%s' -> '%s'  focus=%s  complexity=%s  medical=%s",
-                raw_query,
-                validated["expanded_query"],
-                validated["focus"],
-                validated["complexity"],
-                validated["is_medical_query"],
-            )
-            return validated
-
-        except Exception as exc:  # noqa: BLE001
-            if _is_quota_error(exc):
-                key_manager.mark_exhausted()
-                if attempt >= _MAX_RETRIES - 1:
-                    break
-                log.warning(
-                    "QueryOptimizer: quota error on attempt %d/%d; marking key exhausted and retrying.",
-                    attempt + 1,
-                    _MAX_RETRIES,
-                )
-                continue
-
-            log.warning(
-                "QueryOptimizer: optimizer_failed=True  fallback_to_original_query=True  "
-                "expanded_query_is_static=True  reason=exception  "
-                "exc_type=%s  exc=%s",
-                type(exc).__name__,
-                exc,
-            )
+        )
+        raw_content = result.text
+        payload = _extract_json(raw_content)
+        if payload is None:
+            log.warning("QueryOptimizer: optimizer_failed=True fallback_to_original_query=True reason=unparseable_response provider=%s", result.provider)
             return _build_fallback(raw_query)
-
-    return _build_fallback(raw_query)
+        validated = _validate_payload(payload, raw_query)
+        if validated is None:
+            log.warning("QueryOptimizer: optimizer_failed=True fallback_to_original_query=True reason=schema_validation_failed provider=%s", result.provider)
+            return _build_fallback(raw_query)
+        log.info("QueryOptimizer: optimizer_used=True provider=%s model=%s '%s' -> '%s' focus=%s complexity=%s medical=%s", result.provider, result.model, raw_query, validated["expanded_query"], validated["focus"], validated["complexity"], validated["is_medical_query"])
+        return validated
+    except Exception as exc:  # noqa: BLE001
+        log.warning("QueryOptimizer: optimizer_failed=True fallback_to_original_query=True reason=exception exc_type=%s exc=%s", type(exc).__name__, exc)
+        return _build_fallback(raw_query)

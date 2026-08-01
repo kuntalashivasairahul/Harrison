@@ -74,6 +74,13 @@ citation grounding over raw creativity.**
 | Library  | Role                                                  | Key File                |
 |----------|-------------------------------------------------------|-------------------------|
 | `google-genai` | Gemini inference, dynamic model selection, and rotating key clients | `backend/llm/llm.py` |
+| `groq` | Optional Stage 1 query optimizer provider | `backend/llm/groq_provider.py` |
+
+Stage 1 routes query optimization through Groq only when `GROQ_ENABLED=true`
+and a valid `GROQ_API_KEY` is configured. Gemini remains the only draft and
+verification provider. Provider eligibility is restricted to
+`backend/llm/model_registry.json`; gateways and additional providers are not
+enabled until a later evaluated stage.
 
 ### 4.4 Text Processing & Utilities
 
@@ -133,7 +140,8 @@ All secrets are stored in `backend/.env` (git-ignored).
 | Variable                       | Default  | Purpose                                       |
 |--------------------------------|----------|-----------------------------------------------|
 | `GEMINI_API_KEY`               | —        | Gemini key; used as key-pool slot 1 when numbered key 1 is absent |
-| `GEMINI_API_KEY_1` ... `_10`   | —        | Optional Gemini key pool. Calls advance round-robin; 429/quota keys are skipped for the process lifetime. |
+| `GEMINI_API_KEY`, `GEMINI_API_KEY_1` ... `_10` | — | Main plus optional numbered Gemini key pool. Calls advance round-robin; 429/quota keys enter a temporary cooldown. |
+| `GEMINI_RATE_LIMIT_COOLDOWN_SECONDS` | `60` | Temporary cooldown applied to a key after a 429/quota response. |
 | `SMART_SUMMARY_MAX_TOKENS`     | `3000`   | Generation and normal verification ceiling for `smart_summary` |
 | `QA_MAX_TOKENS`                | `3000`   | Generation and normal verification ceiling for `qa` |
 | `SMART_SUMMARY_CONTEXT_CHAR_LIMIT` | `12000` | Loaded by the LLM module, but not consumed by current fusion logic |
@@ -156,7 +164,8 @@ The `/health` endpoint reports index, embedding, and Gemini-key readiness:
   "embedding_dim": 1024,
   "embedding_index_dim_match": true,
   "gemini_key_present": true,
-  "gemini_key_count": 1
+  "gemini_key_count": 1,
+  "gemini_available_key_count": 1
 }
 ```
 

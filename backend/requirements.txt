@@ -4,5 +4,6 @@ faiss-cpu
 sentence-transformers
 numpy
 google-genai
+groq
 python-dotenv
 rank-bm25

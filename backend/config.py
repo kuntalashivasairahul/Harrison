@@ -19,3 +19,10 @@ DEFAULT_FINAL_K = 6
 DEFAULT_RERANK_POOL = 24
 RRF_K = 60
 RERANK_SCORE_THRESHOLD = -3.0
+
+# LLM routing defaults. Provider-specific capability limits live in
+# backend/llm/model_registry.json; these bound an end-user request path.
+LLM_OPTIMIZER_DEADLINE_SECONDS = 8.0
+LLM_DRAFT_DEADLINE_SECONDS = 30.0
+LLM_VERIFIER_DEADLINE_SECONDS = 30.0
+LLM_PROVIDER_COOLDOWN_SECONDS = 60.0

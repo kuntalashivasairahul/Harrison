@@ -166,8 +166,8 @@ class TestJudgeAnswer(unittest.TestCase):
                 calls.append({"next_client": True})
                 return FakeClient()
 
-            def mark_exhausted(self):
-                calls.append({"mark_exhausted": True})
+            def mark_rate_limited(self):
+                calls.append({"mark_rate_limited": True})
 
             def rotate(self):
                 calls.append({"rotate": True})
@@ -193,7 +193,7 @@ class TestJudgeAnswer(unittest.TestCase):
             evaluate_rag.key_manager = old_key_manager
             evaluate_rag.JUDGE_MODEL = old_model
 
-    def test_judge_rate_limit_marks_exhausted_without_rotate(self):
+    def test_judge_rate_limit_cools_down_key_without_rotate(self):
         calls = []
 
         class FakeModels:
@@ -215,8 +215,8 @@ class TestJudgeAnswer(unittest.TestCase):
                 calls.append({"next_client": True})
                 return FakeClient()
 
-            def mark_exhausted(self):
-                calls.append({"mark_exhausted": True})
+            def mark_rate_limited(self):
+                calls.append({"mark_rate_limited": True})
 
             def rotate(self):
                 calls.append({"rotate": True})
@@ -233,7 +233,7 @@ class TestJudgeAnswer(unittest.TestCase):
 
             self.assertEqual(result["score"], 5)
             self.assertEqual(
-                sum(1 for c in calls if isinstance(c, dict) and c.get("mark_exhausted")),
+                sum(1 for c in calls if isinstance(c, dict) and c.get("mark_rate_limited")),
                 1,
             )
             self.assertFalse(any(c.get("rotate") for c in calls if isinstance(c, dict)))

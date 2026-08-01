@@ -1,87 +1,68 @@
-"""No-network tests for QueryOptimizer key rotation and fallback behavior."""
+"""No-network tests for QueryOptimizer routing and deterministic fallback."""
 
 from __future__ import annotations
 
-import types
 import unittest
+from unittest.mock import MagicMock
 
 from backend.agents import query_optimizer
+from backend.llm.contracts import LLMError, LLMErrorCategory, LLMResult
 
 
-class TestQueryOptimizerRetries(unittest.TestCase):
+def _valid_result(provider: str = "groq") -> LLMResult:
+    return LLMResult(
+        text='{"is_medical_query": true, "expanded_query": "diabetic ketoacidosis diagnosis and treatment", "focus": "management", "complexity": "complex"}',
+        provider=provider,
+        model="test-model",
+    )
+
+
+class TestQueryOptimizerRouting(unittest.TestCase):
     def setUp(self) -> None:
-        self.original_key_manager = query_optimizer.key_manager
+        self.original_router = query_optimizer.llm_router
+        query_optimizer.llm_router = MagicMock()
 
     def tearDown(self) -> None:
-        query_optimizer.key_manager = self.original_key_manager
+        query_optimizer.llm_router = self.original_router
 
-    def test_quota_error_marks_key_then_retries_with_next_client(self) -> None:
-        calls: list[str] = []
-
-        class FakeModels:
-            def __init__(self) -> None:
-                self.attempts = 0
-
-            def generate_content(self, **_kwargs):
-                self.attempts += 1
-                if self.attempts == 1:
-                    raise RuntimeError("429 RESOURCE_EXHAUSTED: quota exceeded")
-                return types.SimpleNamespace(
-                    text=(
-                        '{"is_medical_query": true, '
-                        '"expanded_query": "diabetic ketoacidosis management", '
-                        '"focus": "management", "complexity": "complex"}'
-                    )
-                )
-
-        class FakeClient:
-            def __init__(self, models) -> None:
-                self.models = models
-
-        class FakeKeyManager:
-            def __init__(self) -> None:
-                self.models = FakeModels()
-
-            def next_client(self):
-                calls.append("next_client")
-                return FakeClient(self.models)
-
-            def mark_exhausted(self) -> None:
-                calls.append("mark_exhausted")
-
-        query_optimizer.key_manager = FakeKeyManager()
+    def test_groq_success_uses_router_result(self) -> None:
+        query_optimizer.llm_router.optimize.return_value = _valid_result("groq")
 
         result = query_optimizer.optimize_query("DKA treatment")
 
         self.assertTrue(result["optimizer_used"])
-        self.assertEqual(result["expanded_query"], "diabetic ketoacidosis management")
-        self.assertEqual(calls, ["next_client", "mark_exhausted", "next_client"])
+        self.assertIn("diabetic ketoacidosis", result["expanded_query"])
+        query_optimizer.llm_router.optimize.assert_called_once()
 
-    def test_non_quota_error_returns_fallback_without_marking_key(self) -> None:
-        calls: list[str] = []
+    def test_router_gemini_fallback_result_is_accepted(self) -> None:
+        query_optimizer.llm_router.optimize.return_value = _valid_result("gemini")
 
-        class FakeModels:
-            def generate_content(self, **_kwargs):
-                raise RuntimeError("connection reset by peer")
+        result = query_optimizer.optimize_query("DKA treatment")
 
-        class FakeClient:
-            models = FakeModels()
+        self.assertTrue(result["optimizer_used"])
+        query_optimizer.llm_router.optimize.assert_called_once()
 
-        class FakeKeyManager:
-            def next_client(self):
-                calls.append("next_client")
-                return FakeClient()
+    def test_groq_and_gemini_failure_returns_deterministic_fallback(self) -> None:
+        query_optimizer.llm_router.optimize.side_effect = LLMError(
+            LLMErrorCategory.RATE_LIMITED,
+            "all optimizer deployments cooling down",
+        )
 
-            def mark_exhausted(self) -> None:
-                calls.append("mark_exhausted")
+        result = query_optimizer.optimize_query("DKA treatment")
 
-        query_optimizer.key_manager = FakeKeyManager()
+        self.assertFalse(result["optimizer_used"])
+        self.assertEqual(result["expanded_query"], "DKA treatment")
+        query_optimizer.llm_router.optimize.assert_called_once()
+
+    def test_invalid_response_returns_deterministic_fallback(self) -> None:
+        query_optimizer.llm_router.optimize.return_value = LLMResult(
+            text="not JSON", provider="groq", model="test-model"
+        )
 
         result = query_optimizer.optimize_query("What causes chest pain?")
 
         self.assertFalse(result["optimizer_used"])
         self.assertEqual(result["expanded_query"], "What causes chest pain?")
-        self.assertEqual(calls, ["next_client"])
 
 
 if __name__ == "__main__":

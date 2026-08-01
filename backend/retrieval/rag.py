@@ -76,7 +76,19 @@ def expand_query(query: str, max_queries: int = 4) -> List[str]:
     # Basic paraphrases geared towards textbook-style retrieval
     add_variant(f"Harrison textbook explanation of {q}")
     add_variant(f"clinical features, diagnosis and management of {q} in Harrison")
-    if not lower.startswith("what is"):
+    question_starts = (
+        "what ",
+        "how ",
+        "why ",
+        "when ",
+        "where ",
+        "which ",
+        "describe ",
+        "explain ",
+        "list ",
+        "provide ",
+    )
+    if not lower.startswith(question_starts):
         add_variant(f"What is {q}?")
     add_variant(f"high-yield summary of {q} from Harrison")
 

@@ -8,19 +8,22 @@ from pathlib import Path
 import logging
 import os
 
-log = logging.getLogger(__name__)
+# Uvicorn configures its own error logger/handler, not the root application
+# logger.  Using it makes request-path diagnostics visible in server output.
+log = logging.getLogger("uvicorn.error")
 
 from backend.retrieval import rag
 from backend.retrieval.rag import retrieve
 from backend.utils.fusion import fuse_context
 from backend.processing.evidence import extract_evidence, extract_sources
-from backend.llm.llm import ask_llm, REFUSAL_STR, key_manager
+from backend.llm.llm import ask_llm, REFUSAL_STR, key_manager, llm_router
 from backend.agents.confidence_scorer import calculate_confidence
 from backend.rendering.page_resolver import resolve_page_urls
 from backend.agents.query_optimizer import optimize_query
 from backend.agents.semantic_cache import SemanticCache
 from backend.agents.context_router import route_and_sort_context
 from backend.retrieval.embeddings import embed_text, embedding_dimension
+from backend.retrieval.rerank import warmup_reranker
 from backend.config import (
     DEFAULT_K,
     DEFAULT_RERANK_POOL,
@@ -52,6 +55,13 @@ CACHE_SCHEMA_VERSION = "semantic-cache-v2"
 # Provides sub-100ms responses for repeated or near-identical queries.
 # --------------------------------------------------------------------
 _cache = SemanticCache()
+
+
+@app.on_event("startup")
+def warmup_models() -> None:
+    """Move cross-encoder initialization out of the first user request."""
+    warmup_reranker()
+    log.info("HarrisonGPT: reranker warm-up complete.")
 
 
 def _vectorstore_fingerprint() -> Dict[str, int | None]:
@@ -451,6 +461,8 @@ def health_check():
         "embedding_index_dim_match": embedding_index_dim_match,
         "gemini_key_present": gemini_key_present,
         "gemini_key_count": key_manager.key_count,
+        "gemini_available_key_count": key_manager.available_key_count,
+        "llm_providers": llm_router.status(),
     }
 
 

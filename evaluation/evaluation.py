@@ -22,7 +22,14 @@ for q in queries:
     result = {
         "query": q["query"],
         "latency_seconds": round(latency, 3),
-        "answer": answer["answer"]
+        "answer": answer["answer"],
+        "provider_comparison": {
+            "route": "inspect server llm_route logs",
+            "latency_seconds": round(latency, 3),
+            "returned_path": "not exposed by /ask",
+            "citation_validity": "evaluate from answer/source markers",
+            "confidence": answer.get("confidence"),
+        },
     }
 
     results.append(result)

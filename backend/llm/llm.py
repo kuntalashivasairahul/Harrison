@@ -4,10 +4,14 @@
 import os
 import logging
 import threading
+import time
 from google import genai
 from google.genai import types
 from dotenv import load_dotenv
 from pathlib import Path
+from backend.llm.contracts import LLMError, LLMErrorCategory, LLMRequest, LLMStage
+from backend.llm.gemini_provider import GeminiProvider
+from backend.llm.router import LLMRouter
 
 # --------------------------------------------------------------------
 # ENV LOADING
@@ -19,21 +23,24 @@ log = logging.getLogger(__name__)
 # --------------------------------------------------------------------
 # API KEY ROTATION POOL
 # --------------------------------------------------------------------
-# Loads all GEMINI_API_KEY_1, GEMINI_API_KEY_2, … from the environment.
-# Falls back to the single GEMINI_API_KEY if no numbered keys are found.
+# Loads GEMINI_API_KEY plus GEMINI_API_KEY_1, GEMINI_API_KEY_2, … from the
+# environment. The main key and every numbered key are distinct pool members.
 # ------------------------------------------------------------------
 class KeyManager:
     """Thread-safe Gemini API key rotation pool with round-robin load balancing.
 
-    Loads keys from ``GEMINI_API_KEY_1`` through ``GEMINI_API_KEY_10``.
-    ``GEMINI_API_KEY`` (no suffix) is treated as an alias for slot 1.
+    Loads the main ``GEMINI_API_KEY`` followed by numbered keys
+    ``GEMINI_API_KEY_1`` through ``GEMINI_API_KEY_10``. Each non-empty value
+    is a distinct pool member, for up to eleven independent projects.
 
     Rotation strategy
     -----------------
     - ``next_client()``  : round-robin advance on every call — distributes load
                            evenly across all available keys across requests.
-    - ``mark_exhausted()``: permanently skips a key for the session when it
-                           returns a 429 / quota error.
+    - ``mark_rate_limited()``: temporarily skips a key after a 429 / quota
+                               error, allowing it back after a cooldown.
+    - ``mark_exhausted()``: permanently skips a key only when a caller has
+                            definitive evidence that the key cannot recover.
     - ``make_client()``  : returns a client for the CURRENT key without
                            advancing — used within the same request's retry loop.
     - ``rotate()``       : legacy helper; advances to next non-exhausted key.
@@ -41,30 +48,34 @@ class KeyManager:
     Usage
     -----
     >>> client = key_manager.next_client()    # start of each LLM call
-    >>> key_manager.mark_exhausted()          # on 429 error
+    >>> key_manager.mark_rate_limited()       # on 429 error
     """
 
     TOTAL_SLOTS: int = 10
+    DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS: float = float(
+        os.getenv("GEMINI_RATE_LIMIT_COOLDOWN_SECONDS", "60")
+    )
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._keys: list[str] = []
         self._current_idx: int = -1          # -1 so first next_client() → key[0]
-        self._exhausted: set[int] = set()    # indices of quota-exceeded keys
+        self._exhausted: set[int] = set()    # indices of permanently unusable keys
+        self._rate_limited_until: dict[int, float] = {}
 
-        # Explicit 10-slot loading — deterministic order, no env-scan surprises.
+        # Main key first, then explicit numbered slots in deterministic order.
+        main_key = os.getenv("GEMINI_API_KEY", "").strip()
+        if main_key:
+            self._keys.append(main_key)
         for slot in range(1, self.TOTAL_SLOTS + 1):
             val = os.getenv(f"GEMINI_API_KEY_{slot}", "").strip()
-            if not val and slot == 1:
-                # Bare GEMINI_API_KEY is an alias for slot 1
-                val = os.getenv("GEMINI_API_KEY", "").strip()
             if val:
                 self._keys.append(val)
 
         log.info(
             "KeyManager: Loaded %d/%d Gemini API keys.",
             len(self._keys),
-            self.TOTAL_SLOTS,
+            self.TOTAL_SLOTS + 1,
         )
         if not self._keys:
             log.warning("KeyManager: NO Gemini API keys found in environment!")
@@ -76,9 +87,26 @@ class KeyManager:
         """Number of keys in the pool."""
         return len(self._keys)
 
+    @property
+    def available_key_count(self) -> int:
+        """Number of keys currently eligible to serve a request."""
+        with self._lock:
+            now = time.monotonic()
+            return sum(
+                1
+                for idx in range(len(self._keys))
+                if self._is_available(idx, now)
+            )
+
     def has_keys(self) -> bool:
-        """Return True if at least one key is available."""
-        return len(self._keys) > 0
+        """Return True if at least one key is currently available."""
+        return self.available_key_count > 0
+
+    def _is_available(self, idx: int, now: float) -> bool:
+        if idx in self._exhausted:
+            return False
+        rate_limited_until = getattr(self, "_rate_limited_until", {}).get(idx, 0.0)
+        return rate_limited_until <= now
 
     def get_current_key(self) -> str | None:
         """Return the currently active API key, or None if pool is empty."""
@@ -87,15 +115,15 @@ class KeyManager:
         return self._keys[self._current_idx]
 
     def next_client(self) -> genai.Client:
-        """Round-robin: advance cursor to the next non-exhausted key.
+        """Round-robin: advance cursor to the next currently eligible key.
 
-        Distributes load evenly across all available keys.  Skips any key
-        that has been marked exhausted in this session.
+        Distributes load evenly across all available keys. Skips permanently
+        exhausted keys and keys that are still inside a rate-limit cooldown.
 
         Raises
         ------
         RuntimeError
-            If the pool is empty or all keys are exhausted.
+            If the pool is empty or no key is currently eligible.
         """
         if not self._keys:
             raise RuntimeError("KeyManager: No Gemini API keys available.")
@@ -103,10 +131,11 @@ class KeyManager:
         with self._lock:
             total = len(self._keys)
             start = self._current_idx
+            now = time.monotonic()
             for _ in range(total):
                 candidate = (start + 1) % total
                 start = candidate
-                if candidate not in self._exhausted:
+                if self._is_available(candidate, now):
                     self._current_idx = candidate
                     log.debug(
                         "KeyManager: using key #%d/%d.",
@@ -116,7 +145,8 @@ class KeyManager:
                     return genai.Client(api_key=self._keys[candidate])
 
             raise RuntimeError(
-                f"KeyManager: All {total} API key(s) exhausted for this session."
+                f"KeyManager: No eligible Gemini API key is currently available "
+                f"({len(self._exhausted)} permanently exhausted; remaining keys are rate-limited)."
             )
 
     def make_client(self) -> genai.Client:
@@ -133,10 +163,10 @@ class KeyManager:
         return genai.Client(api_key=key)
 
     def mark_exhausted(self) -> None:
-        """Mark the CURRENT key as quota-exceeded for this session.
+        """Permanently mark the CURRENT key as unusable for this session.
 
-        The key will be skipped by all future ``next_client()`` and
-        ``rotate()`` calls.  Thread-safe.
+        Use this only for definitive key failures. Transient 429/quota
+        responses should call ``mark_rate_limited()`` instead.
         """
         with self._lock:
             idx = self._current_idx
@@ -150,6 +180,34 @@ class KeyManager:
                     len(self._keys) - len(self._exhausted),
                     len(self._keys),
                 )
+
+    def mark_rate_limited(self, cooldown_seconds: float | None = None) -> None:
+        """Temporarily remove the current key after a 429 / quota response."""
+        cooldown = (
+            self.DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS
+            if cooldown_seconds is None
+            else max(float(cooldown_seconds), 1.0)
+        )
+        with self._lock:
+            idx = self._current_idx
+            if idx < 0 or idx >= len(self._keys):
+                return
+            until = time.monotonic() + cooldown
+            existing_until = self._rate_limited_until.get(idx, 0.0)
+            self._rate_limited_until[idx] = max(existing_until, until)
+            available_count = sum(
+                1
+                for candidate in range(len(self._keys))
+                if self._is_available(candidate, time.monotonic())
+            )
+            log.warning(
+                "KeyManager: key #%d/%d rate-limited for %.0fs (%d/%d keys available).",
+                idx + 1,
+                len(self._keys),
+                cooldown,
+                available_count,
+                len(self._keys),
+            )
 
     def rotate(self) -> str | None:
         """Advance to the next non-exhausted key and return the new key.
@@ -165,7 +223,7 @@ class KeyManager:
             for _ in range(total):
                 candidate = (start + 1) % total
                 start = candidate
-                if candidate not in self._exhausted:
+                if self._is_available(candidate, time.monotonic()):
                     self._current_idx = candidate
                     key = self._keys[candidate]
                     log.info(
@@ -305,6 +363,8 @@ PROD_MODEL, BACKUP_MODEL = get_dynamic_models(key_manager.get_current_key())
 # --------------------------------------------------------------------
 
 MAX_RETRIES = max(key_manager.key_count, 3)
+DRAFT_MAX_ATTEMPTS = int(os.getenv("LLM_DRAFT_MAX_ATTEMPTS", "3"))
+VERIFIER_MAX_ATTEMPTS = int(os.getenv("LLM_VERIFIER_MAX_ATTEMPTS", "2"))
 
 
 def _is_quota_error(exc: Exception) -> bool:
@@ -373,6 +433,12 @@ def _extract_text_safely(response) -> tuple[str, bool]:
         pass
 
     return text.strip(), was_truncated
+
+
+# Created after model discovery and response parsing exist.  The getter keeps
+# the current KeyManager patchable for tests and for the process-wide pool.
+gemini_provider = GeminiProvider(lambda: key_manager, _extract_text_safely)
+llm_router = LLMRouter(gemini_provider, PROD_MODEL, BACKUP_MODEL)
 
 
 # --------------------------------------------------------------------
@@ -484,20 +550,23 @@ def verify_answer(
     )
 
     last_exc: Exception | None = None
-    for attempt in range(MAX_RETRIES):
+    for attempt in range(VERIFIER_MAX_ATTEMPTS):
         try:
-            client = key_manager.next_client()   # round-robin advance per attempt
-            resp = client.models.generate_content(
-                model=model,
-                contents=verify_user,
-                config=types.GenerateContentConfig(
+            result = llm_router.generate_named(
+                LLMRequest(
+                    prompt=verify_user,
                     system_instruction=verify_prompt,
+                    model_alias="gemini-primary",
                     temperature=0.0,
                     max_output_tokens=max_tokens,
-                )
+                    deadline_seconds=float(os.getenv("LLM_VERIFIER_DEADLINE_SECONDS", "30")),
+                    stage=LLMStage.VERIFIER,
+                ),
+                "gemini-primary",
+                model_override=model,
             )
-
-            verified, truncated = _extract_text_safely(resp)
+            verified = result.text
+            truncated = result.finish_reason == "MAX_TOKENS"
 
             if not verified:
                 return answer, truncated, True
@@ -507,21 +576,21 @@ def verify_answer(
                     "verify_answer: verifier output truncated (MAX_TOKENS) "
                     "on attempt %d/%d — returning partial verified text.",
                     attempt + 1,
-                    MAX_RETRIES,
+                    VERIFIER_MAX_ATTEMPTS,
                 )
 
             return verified, truncated, True
 
-        except Exception as exc:
+        except LLMError as exc:
             last_exc = exc
-            if _is_quota_error(exc) and attempt < MAX_RETRIES - 1:
+            if exc.category == LLMErrorCategory.RATE_LIMITED and attempt < VERIFIER_MAX_ATTEMPTS - 1:
                 log.warning(
                     "verify_answer: quota error on attempt %d/%d — "
-                    "marking key exhausted and rotating.",
+                    "cooling down key and rotating.",
                     attempt + 1,
-                    MAX_RETRIES,
+                    VERIFIER_MAX_ATTEMPTS,
                 )
-                key_manager.mark_exhausted()
+                key_manager.mark_rate_limited(exc.retry_after_seconds)
                 continue
             # Non-quota error or final attempt — fall through
             break
@@ -563,18 +632,18 @@ You are HarrisonGPT, a rigorous clinical synthesis engine grounded EXCLUSIVELY i
 </core_directives>
 
 <clinical_rigor>
-To combat summarization bias, you MUST obey these extraction rules if the data exists in the context:
+When directly relevant to the user's question, preserve these details if they exist in the context:
 - NUMERICAL GRANULARITY: You MUST explicitly state exact lab thresholds, fluid volumes, and diagnostic cutoffs. You must **bold** these numbers (e.g., "**pH < 7.30**", "**glucose > 250 mg/dL**"). Do NOT summarize them as "elevated" or "low".
-- ETIOLOGY & MECHANISMS: Always name the primary triggers of a disease (e.g., gallstones, alcohol) and the exact cellular enzymes/pathways involved.
-- SCORING SYSTEMS: List full criteria and point values for clinical scores (e.g., CURB-65, Ranson).
-- PROTOCOLS: Provide exact drug dosages, fluid rates, and chronological treatment steps.
+- ETIOLOGY & MECHANISMS: Name primary triggers and mechanisms when asked about causes or pathophysiology.
+- SCORING SYSTEMS: List full criteria and point values when a score is relevant to the question.
+- PROTOCOLS: Provide exact drug doses, fluid rates, and chronological treatment steps when management is requested.
 </clinical_rigor>
 
 <clinical_granularity>
-You are a rigorous clinical engine, not a summarizer. You MUST explicitly extract and preserve:
+You are a rigorous clinical engine, not a summarizer. When relevant to the requested scope, explicitly extract and preserve:
 1. Clinical scoring systems (e.g., CURB-65, PORT/PSI, Ranson, APACHE II, Wells, CHADS2-VASc) — reproduce the FULL criteria with individual point values in a structured list. Never mention a scoring system without listing its components.
 2. Exact numerical thresholds and criteria (e.g., specific pH levels, anion gap numbers, serum lipase cutoffs, BUN/creatinine ratios) — always state the exact number in **bold**. Never replace a number with qualitative language like "elevated" or "abnormal".
-3. Primary etiologies and triggers (e.g., alcohol, gallstones for pancreatitis; S. pneumoniae for CAP) — enumerate ALL etiologies mentioned in the context, not just the top two.
+3. Primary etiologies and triggers (e.g., alcohol, gallstones for pancreatitis; S. pneumoniae for CAP) — enumerate them when the question asks about causes or workup.
 4. Diagnostic criteria sets — if the context contains named diagnostic criteria (e.g., Atlanta criteria, Light's criteria, Duke criteria), reproduce them as a complete checklist.
 5. Drug regimens — state exact drug names, doses, routes, and durations. Do not say "appropriate antibiotics"; say which ones.
 
@@ -588,22 +657,40 @@ NEVER output the following:
 - Placeholder phrases or empty headers.
 </forbidden_patterns>
 
-<formatting_mode_{mode}>
-IF MODE = qa:
-Deliver a dense, textbook-style clinical explanation in 2-5 paragraphs. Use markdown headers for clinical topics ONLY (e.g., `### Pathophysiology`, `### Management`). Integrate all citations `[p:NNN]` naturally at the end of sentences. Do not use conversational filler.
+<evidence_handling>
+If an "Evidence from Harrison" section is provided, treat it as ground truth. Synthesize these facts directly into your response structure; do not just copy-paste the bullet list.
+</evidence_handling>
+"""
 
-IF MODE = smart_summary:
+QA_FORMAT_INSTRUCTIONS = """\
+<formatting_mode_qa>
+Deliver a focused, textbook-style answer in 2-5 dense paragraphs. Address only
+the requested clinical scope; do not add etiologies, management, or broad
+review material unless it is necessary to answer the question. Use a heading
+only when it improves clarity. Integrate citations `[p:NNN]` naturally at the
+end of sentences. Do not use Smart Summary acknowledgement text, a Quick
+Revision section, or conversational filler.
+</formatting_mode_qa>
+"""
+
+SMART_SUMMARY_FORMAT_INSTRUCTIONS = """\
+<formatting_mode_smart_summary>
 Generate an actionable, high-yield structured synthesis.
 - The first line MUST be exactly: "Topic received — generating Harrison Smart Summary."
 - Use `###` headings for major sections.
 - Utilize bold text and bulleted lists heavily for readability.
 - Close with a `### Quick Revision` block containing 3-5 absolute must-know facts.
-</formatting_mode_{mode}>
-
-<evidence_handling>
-If an "Evidence from Harrison" section is provided, treat it as ground truth. Synthesize these facts directly into your response structure; do not just copy-paste the bullet list.
-</evidence_handling>
+</formatting_mode_smart_summary>
 """
+
+
+def _formatting_instructions(mode: str) -> str:
+    """Return the only formatting policy the selected mode may receive."""
+    return (
+        SMART_SUMMARY_FORMAT_INSTRUCTIONS
+        if mode == "smart_summary"
+        else QA_FORMAT_INSTRUCTIONS
+    )
 
 
 def _enforce_smart_summary_shape(content: str) -> str:
@@ -669,7 +756,7 @@ def ask_llm(
         else QA_MAX_TOKENS
     )
 
-    prompt_header = MASTER_MEDICAL_SYNTHESIS_PROMPT
+    prompt_header = MASTER_MEDICAL_SYNTHESIS_PROMPT + "\n" + _formatting_instructions(mode)
 
     evidence_lines = ""
     if evidence:
@@ -687,24 +774,28 @@ def ask_llm(
     )
 
     last_exc: Exception | None = None
-    for attempt in range(MAX_RETRIES):
+    for attempt in range(DRAFT_MAX_ATTEMPTS):
         try:
-            client = key_manager.next_client()   # round-robin advance per attempt
             t_gen_start = time.perf_counter()
-            response = client.models.generate_content(
-                model=model,
-                contents=prompt,
-                config=types.GenerateContentConfig(
+            result = llm_router.generate_named(
+                LLMRequest(
+                    prompt=prompt,
                     system_instruction="Follow instructions strictly and never use knowledge outside the provided context.",
+                    model_alias="gemini-primary",
                     temperature=0.2,
                     max_output_tokens=generation_max_tokens,
-                )
+                    deadline_seconds=float(os.getenv("LLM_DRAFT_DEADLINE_SECONDS", "30")),
+                    stage=LLMStage.DRAFT,
+                ),
+                "gemini-primary",
+                model_override=model,
             )
             t_gen_end = time.perf_counter()
             if timings is not None:
                 timings["draft_generation"] = timings.get("draft_generation", 0.0) + (t_gen_end - t_gen_start)
 
-            content, draft_truncated = _extract_text_safely(response)
+            content = result.text
+            draft_truncated = result.finish_reason == "MAX_TOKENS"
 
             if not content:
                 return REFUSAL_STR, "", False, "error_fallback"
@@ -714,7 +805,7 @@ def ask_llm(
                     "ask_llm: generation truncated (MAX_TOKENS) on attempt %d/%d — "
                     "appending truncation notice to partial answer.",
                     attempt + 1,
-                    MAX_RETRIES,
+                    DRAFT_MAX_ATTEMPTS,
                 )
                 content += (
                     "\n\n> ⚠️ *Answer truncated — token budget reached. "
@@ -750,7 +841,10 @@ def ask_llm(
 
             # Retry verification once if truncated
             if verifier_truncated and verification_ran:
-                log.info("ask_llm: verify_answer output truncated. Retrying verification once with compact prompt and larger budget.")
+                log.info(
+                    "ask_llm: verify_answer output truncated. Retrying once with "
+                    "a compact prompt and the configured mode budget."
+                )
                 t_retry_start = time.perf_counter()
                 verified_retry, verifier_truncated_retry, retry_ran = verify_answer(
                     draft_answer,
@@ -758,7 +852,7 @@ def ask_llm(
                     mode=mode,
                     model=model,
                     compact_prompt=True,
-                    max_output_tokens=8192,
+                    max_output_tokens=generation_max_tokens,
                 )
                 t_retry_end = time.perf_counter()
                 if timings is not None:
@@ -822,16 +916,16 @@ def ask_llm(
 
             return final_answer, draft_answer, was_truncated, returned_path
 
-        except Exception as exc:
+        except LLMError as exc:
             last_exc = exc
-            if _is_quota_error(exc) and attempt < MAX_RETRIES - 1:
+            if exc.category == LLMErrorCategory.RATE_LIMITED and attempt < DRAFT_MAX_ATTEMPTS - 1:
                 log.warning(
                     "ask_llm: quota error on attempt %d/%d — "
-                    "marking key exhausted and rotating.",
+                    "cooling down key and rotating.",
                     attempt + 1,
-                    MAX_RETRIES,
+                    DRAFT_MAX_ATTEMPTS,
                 )
-                key_manager.mark_exhausted()
+                key_manager.mark_rate_limited(exc.retry_after_seconds)
                 continue
             # Non-quota error or final attempt — fall through
             break

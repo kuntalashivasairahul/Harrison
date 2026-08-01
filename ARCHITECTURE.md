@@ -13,12 +13,12 @@
 
 The request lifecycle for `/ask` is:
 
-1. `optimize_query()` classifies the query, rejects non-medical requests, expands the search query, and labels complexity.
+1. `optimize_query()` calls the approved router: Groq first when explicitly enabled, Gemini Flash-Lite second, then a deterministic local fallback. It classifies the query, rejects non-medical requests, expands the search query, and labels complexity.
 2. The API embeds the search query with `BAAI/bge-m3` and checks the semantic cache against exact runtime metadata.
 3. A cache miss runs hybrid FAISS/BM25 retrieval, RRF fusion (`RRF_K=60`), neighbor expansion, cross-encoder reranking, and the `RERANK_SCORE_THRESHOLD=-3.0` hard filter.
 4. `route_and_sort_context()` deduplicates and page-orders chunks; `fuse_context()` constructs the prompt context within its fixed 12,000-character limit.
 5. Evidence and source labels are extracted from the retrieved chunks.
-6. `ask_llm()` calls Gemini through `google-genai`. `KeyManager` uses `GEMINI_API_KEY_1` through `_10` (or `GEMINI_API_KEY` as slot 1), rotates clients round-robin, and marks quota-exhausted keys for the process lifetime.
+6. `ask_llm()` uses the stage-aware router with the approved `gemini-primary` deployment. `KeyManager` uses `GEMINI_API_KEY` plus `GEMINI_API_KEY_1` through `_10` as distinct round-robin projects and temporarily cools down individual projects after quota responses.
 7. Unless `disable_verifier` is requested, `verify_answer()` performs a grounded Gemini rewrite at temperature `0.0`. A complete verified response is the only response eligible for semantic-cache persistence.
 8. `backend/agents/confidence_scorer.py` scores the final response from average cross-encoder relevance and draft-to-verified length divergence; return-path and truncation caps are then applied by the API.
 9. Source labels are resolved into page-image URLs and returned with timing data in `QueryResponse`.
@@ -70,8 +70,10 @@ Harrison/                              ← Project root
 │   │   └── embeddings.py              ← embed_text() — FAISS query embedding
 │   │
 │   ├── llm/
-│   │   └── llm.py                     ← ask_llm(), verify_answer()
-│   │                                    Gemini key management, prompts, and verification
+│   │   ├── llm.py                     ← ask_llm(), verify_answer(), Gemini key management
+│   │   ├── router.py                  ← approved deployment routing and cooldown state
+│   │   ├── contracts.py               ← provider-neutral request/result/error contracts
+│   │   └── model_registry.json        ← Stage 1 provider allowlist
 │   │                                    REFUSAL_STR sentinel defined here
 │   │
 │   ├── processing/
