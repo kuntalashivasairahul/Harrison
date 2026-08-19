@@ -1,11 +1,10 @@
 #!/bin/bash
 set -e
 
-# setup_env.sh
-# Check if python3.12 is available, install via brew if missing, and create a clean venv.
+# Create a local Python environment from any clone location.
 
-WORKSPACE_DIR="/Users/shivasairahulkuntala/Developer/AI_Projects/nlp_models/Harrison"
-cd "$WORKSPACE_DIR"
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+cd "$SCRIPT_DIR/.."
 
 echo "=== Checking Python 3.12 availability ==="
 PYTHON_EXE=""
@@ -19,14 +18,8 @@ elif [ -f "/usr/local/bin/python3.12" ]; then
 fi
 
 if [ -z "$PYTHON_EXE" ]; then
-    echo "Python 3.12 not found. Installing python@3.12 via Homebrew..."
-    if command -v brew &> /dev/null; then
-        brew install python@3.12
-        PYTHON_EXE="/opt/homebrew/bin/python3.12"
-    else
-        echo "Error: Homebrew is not installed and Python 3.12 was not found. Please install Python 3.12 manually."
-        exit 1
-    fi
+    echo "Python 3.12 was not found. Install it, then re-run this script."
+    exit 1
 else
     echo "Using existing Python 3.12: $PYTHON_EXE"
 fi
@@ -40,8 +33,8 @@ else
 fi
 
 echo "=== Upgrading pip and installing requirements ==="
-.venv312/bin/pip install --upgrade pip
-.venv312/bin/pip install -r backend/requirements.txt
+.venv312/bin/python -m pip install --upgrade pip
+.venv312/bin/python -m pip install -r backend/requirements.txt
 
 echo "=== Environment Setup Complete! ==="
 .venv312/bin/python --version

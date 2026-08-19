@@ -26,7 +26,7 @@ HarrisonGPT is a production-grade, high-recall **Medical Retrieval-Augmented Gen
 
 ## 🗺️ System Control Flow & Architecture
 
-For a detailed walkthrough, step-by-step trace, and sequence diagram of how control flows from request intake to response delivery, refer to the [workflow.md](file:///Users/shivasairahulkuntala/Developer/AI_Projects/nlp_models/Harrison/workflow.md) file.
+For a detailed walkthrough, step-by-step trace, and sequence diagram of how control flows from request intake to response delivery, refer to [workflow.md](workflow.md).
 
 ---
 
@@ -37,11 +37,22 @@ For a detailed walkthrough, step-by-step trace, and sequence diagram of how cont
 * Virtual Environment manager (venv)
 
 ### 2. Environment Setup
-Clone the repository and initialize the Python virtual environment:
+Clone the repository. The checked-in production vectorstore under
+`artifacts/vectorstore/` is sufficient to serve queries immediately; it
+contains a `66 MB` FAISS index and `32 MB` matching chunk registry. Do not
+separate these two files.
+
+On macOS or Linux, initialize the Python virtual environment:
 ```bash
 ./scripts/setup_env.sh
 # Or, after setup:
 .venv312/bin/pip install -r backend/requirements.txt
+```
+
+On Windows PowerShell:
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+.\scripts\setup_env.ps1
 ```
 
 ### 3. Environment Variables Config
@@ -81,7 +92,23 @@ Start the ASGI development server from the workspace root:
 ```bash
 .venv312/bin/python -m uvicorn backend.api.main:app --reload --host 127.0.0.1 --port 8000
 ```
+
+On Windows PowerShell:
+```powershell
+.\.venv312\Scripts\python.exe -m uvicorn backend.api.main:app --reload --host 127.0.0.1 --port 8000
+```
 The server will start at `http://127.0.0.1:8000`.
+
+### Portable Assets
+
+The production retrieval index is committed so a normal `git clone` can answer
+questions without rebuilding embeddings. `backend/.env`, semantic-cache data,
+staging indexes, backups, rendered page images, and the original PDF are
+intentionally excluded. Copy your own keys into `backend/.env` from
+`.env.example` on each machine. The API still runs without the page-image
+archive; only `/pages/...` visual links will be empty. See
+[`artifacts/vectorstore/README.md`](artifacts/vectorstore/README.md) for the
+index checksums and deliberate rebuild command.
 
 ---
 

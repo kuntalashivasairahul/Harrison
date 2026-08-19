@@ -9,9 +9,14 @@ venv/
 .venv312
 
 # AI Artifacts & Memory
-artifacts/vectorstore/
+# The production vectorstore is a deliberately versioned, runnable snapshot.
+# Staging output, backups, and query logs remain machine-local.
+artifacts/vectorstore_staging/
+artifacts/vectorstore_backup/
 artifacts/retrieval_logs/
 *.faiss
+!artifacts/vectorstore/index.faiss
+!artifacts/vectorstore/chunks.json
 
 # Visual Assets (Ignores the 8,000+ images)
 storage/pages/
