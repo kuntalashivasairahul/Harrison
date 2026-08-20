@@ -38,7 +38,6 @@ def clean_text(text: str) -> str:
 # no effect on the fused-context budget it claimed to control.
 # ---------------------------------------------------------------------------
 SAFE_CHAR_LIMIT:    int = int(os.getenv("SMART_SUMMARY_CONTEXT_CHAR_LIMIT", "12000"))
-SAFE_TOKEN_LIMIT:   int = SAFE_CHAR_LIMIT // 4   # retained for callers/tests
 
 
 def _chunk_score(chunk: dict) -> float:
@@ -57,7 +56,7 @@ def _chunk_score(chunk: dict) -> float:
 def fuse_chunks(chunks) -> str:
     """
     Fuse retrieved chunks into a single context string that is guaranteed to
-    fit inside SAFE_CHAR_LIMIT characters (~SAFE_TOKEN_LIMIT tokens).
+    fit inside SAFE_CHAR_LIMIT characters (roughly SAFE_CHAR_LIMIT / 4 tokens).
 
     Each chunk is formatted as:
 

@@ -99,7 +99,7 @@ Harrison/                              ← Project root
 │   │   │                                _hybrid_candidates(), _pretrim_for_rerank(),
 │   │   │                                retrieve(); lazy vectorstore via warmup()
 │   │   │                                Uses RERANK_SCORE_THRESHOLD from config.py
-│   │   ├── rerank.py                  ← CrossEncoder wrapper: rerank(), top_score()
+│   │   ├── rerank.py                  ← CrossEncoder wrapper: rerank(), warmup_reranker()
 │   │   └── embeddings.py              ← embed_text() — FAISS query embedding
 │   │
 │   ├── llm/
@@ -124,8 +124,11 @@ Harrison/                              ← Project root
 │   ├── utils/
 │   │   └── fusion.py                  ← fuse_context(), clean_text()
 │   │
-│   ├── config.py                      ← Global path & model constants
+│   ├── config.py                      ← Paths, models, retrieval + deadline constants
+│   │                                    Deadlines read the environment HERE; call
+│   │                                    sites import them, never os.getenv directly
 │   ├── logging_config.py              ← configure_logging(); call before backend imports
+│   ├── observability.py               ← request-id context, RequestIdFilter, metrics
 │   ├── requirements.txt               ← Pinned runtime dependencies
 │   ├── requirements-dev.txt           ← Test/lint dependencies
 │   └── .env                           ← Secrets (git-ignored)
@@ -158,7 +161,7 @@ api/main.py
     ├── utils/fusion.py           (fuse_context)
     ├── processing/evidence.py    (extract_evidence, extract_sources)
     ├── llm/llm.py                (ask_llm, resolve_models)
-    ├── retrieval/rerank.py       (top_score)
+    ├── observability.py          (metrics, request ids)
     ├── agents/confidence_scorer.py (calculate_confidence)
     └── rendering/page_resolver.py (resolve_page_urls)
 
@@ -201,7 +204,7 @@ appear in only one index receive only one term.
 
 | Condition                                                      | Label      |
 |----------------------------------------------------------------|------------|
-| No retrieved chunks, or half or more of them carry no usable score | **Low**  |
+| No retrieved chunks, or half or more carry no usable cross-encoder score | **Low**  |
 | Average score `< -2.0`                                          | **Low**  |
 | Draft-to-verified length divergence `> 0.40`                    | **Low**  |
 | Average score `>= -0.5`, at least two scored chunks, none unscored | **High** |
@@ -216,6 +219,20 @@ RERANK_SCORE_THRESHOLD = -3.0  # raw ms-marco-MiniLM logit
 Chunks scoring below this value are dropped **after** reranking but **before**
 context fusion. It is defined in `backend/config.py` and used by
 `backend/retrieval/rag.py`; it is not configurable at the API layer.
+
+---
+
+## 5.4 Endpoints
+
+| Method | Path | Auth | Notes |
+|---|---|---|---|
+| `POST` | `/ask` | none | Rate-limited per client. `query` bounded to `HARRISON_MAX_QUERY_CHARS` (2000). |
+| `GET` | `/health` | none | **503** when degraded, 200 when ok. Never rate-limited. |
+| `GET` | `/metrics` | none | Counters and p50/p95 per pipeline stage, in-process. |
+| `DELETE` | `/admin/cache` | `X-Admin-Token` | 503 when `HARRISON_ADMIN_TOKEN` is unset — closed by default, not open. |
+
+Every response carries `X-Request-ID`; a supplied one is echoed back so a
+caller's trace id survives into the logs.
 
 ---
 
@@ -258,4 +275,4 @@ draft_answer  ──→  verify_answer(draft, context, mode, model)  ──→  
 
 ---
 
-*Last updated: 2026-08-20 | Maintainer: HarrisonGPT AI Governance*
+*Last updated: 2026-08-21 | Maintainer: HarrisonGPT AI Governance*

@@ -11,6 +11,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from backend.config import LLM_PROVIDER_COOLDOWN_SECONDS
 from backend.llm.contracts import LLMError, LLMErrorCategory, LLMRequest, LLMResult, LLMStage
 from backend.llm.groq_provider import GroqProvider
 
@@ -62,7 +63,7 @@ class LLMRouter:
         self._lock = threading.Lock()
         self._cooldowns: dict[str, float] = {}
         self._last_errors: dict[str, str] = {}
-        self._default_cooldown = float(os.getenv("LLM_PROVIDER_COOLDOWN_SECONDS", "60"))
+        self._default_cooldown = LLM_PROVIDER_COOLDOWN_SECONDS
 
     def _cooling_down(self, alias: str) -> bool:
         """Read cooldown state under the lock.

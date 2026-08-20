@@ -89,29 +89,6 @@ _CACHE_FILE   = _CACHE_DIR / "semantic_cache.json"
 
 
 # ---------------------------------------------------------------------------
-# Cosine similarity helper
-# ---------------------------------------------------------------------------
-
-def _cosine_similarity(a: list[float], b: list[float]) -> float:
-    """
-    Compute the cosine similarity between two equal-length float lists.
-
-    Returns a value in [-1.0, 1.0].  Returns 0.0 on any numerical error
-    (e.g. zero-norm vectors) so a bad vector never triggers a false cache hit.
-    """
-    va = np.array(a, dtype=np.float32)
-    vb = np.array(b, dtype=np.float32)
-
-    norm_a = float(np.linalg.norm(va))
-    norm_b = float(np.linalg.norm(vb))
-
-    if norm_a == 0.0 or norm_b == 0.0:
-        return 0.0
-
-    return float(np.dot(va, vb) / (norm_a * norm_b))
-
-
-# ---------------------------------------------------------------------------
 # SemanticCache
 # ---------------------------------------------------------------------------
 
@@ -271,10 +248,9 @@ class SemanticCache:
         best_response: dict | None = None
         best_idx: int = -1
 
-        # Score every eligible entry in one matmul.  The previous loop called
-        # _cosine_similarity() per entry, and each call rebuilt a NumPy array
-        # from the *query* list — 1024 floats converted once per stored entry
-        # instead of once per request.
+        # Score every eligible entry in one matmul.  A previous implementation
+        # looped a per-pair cosine helper, rebuilding a NumPy array from the
+        # *query* list once per stored entry instead of once per request.
         try:
             dim = len(query_embedding)
             eligible = [

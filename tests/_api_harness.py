@@ -49,7 +49,6 @@ def build_stubs() -> dict[str, types.ModuleType]:
     fake_rerank = _module(
         "backend.retrieval.rerank",
         warmup_reranker=MagicMock(),
-        top_score=MagicMock(return_value=0.0),
         rerank=MagicMock(return_value=[]),
     )
 

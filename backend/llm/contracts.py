@@ -11,7 +11,6 @@ class LLMStage(str, Enum):
     OPTIMIZER = "optimizer"
     DRAFT = "draft"
     VERIFIER = "verifier"
-    EVALUATION = "evaluation"
 
 
 class LLMErrorCategory(str, Enum):

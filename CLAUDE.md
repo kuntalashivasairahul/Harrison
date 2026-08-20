@@ -36,7 +36,7 @@ virtualenv; if you find one, it is a mistake.
 
 ```bash
 ./scripts/setup_env.sh                        # creates .venv312, installs runtime + dev deps
-.venv312/bin/python -m pytest                 # 255 tests, ~4s, fully hermetic
+.venv312/bin/python -m pytest                 # 252 tests, ~4s, fully hermetic
 .venv312/bin/python -m ruff check backend/ tests/
 .venv312/bin/python -m uvicorn backend.api.main:app --reload --host 127.0.0.1 --port 8000
 ```
@@ -101,3 +101,8 @@ and do not let them into general context.
 - The corpus has gaps. "Ranson" appears in 1 chunk of 16,983 and it is not the
   criteria table, so the system correctly refuses a question the prompt template
   promises to answer.
+- **Deadlines and cooldowns live in `backend/config.py`** and are imported by
+  call sites. Do not reintroduce `os.getenv("LLM_..._DEADLINE_SECONDS")` at a
+  call site — config and the live values silently drifted apart that way before.
+- Anything in `scripts/` is documented in `scripts/README.md`. Check there
+  before assuming a script is dead.

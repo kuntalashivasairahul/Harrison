@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 from google import genai
 from google.genai import types  # noqa: F401  (patched by tests)
 
+from backend.config import LLM_DRAFT_DEADLINE_SECONDS, LLM_VERIFIER_DEADLINE_SECONDS
 from backend.llm.contracts import LLMError, LLMErrorCategory, LLMRequest, LLMStage
 from backend.llm.gemini_provider import GeminiProvider
 from backend.llm.router import LLMRouter
@@ -45,7 +46,6 @@ class KeyManager:
                             definitive evidence that the key cannot recover.
     - ``make_client()``  : returns a client for the CURRENT key without
                            advancing — used within the same request's retry loop.
-    - ``rotate()``       : legacy helper; advances to next non-exhausted key.
 
     Usage
     -----
@@ -210,32 +210,6 @@ class KeyManager:
                 available_count,
                 len(self._keys),
             )
-
-    def rotate(self) -> str | None:
-        """Advance to the next non-exhausted key and return the new key.
-
-        Thread-safe.  Wraps around after exhausting the pool.  Returns
-        ``None`` if the pool is empty or all keys are exhausted.
-        """
-        if not self._keys:
-            return None
-        with self._lock:
-            total = len(self._keys)
-            start = self._current_idx
-            for _ in range(total):
-                candidate = (start + 1) % total
-                start = candidate
-                if self._is_available(candidate, time.monotonic()):
-                    self._current_idx = candidate
-                    key = self._keys[candidate]
-                    log.info(
-                        "KeyManager: rotated to key #%d/%d.",
-                        candidate + 1,
-                        total,
-                    )
-                    return key
-            log.error("KeyManager: all keys exhausted — cannot rotate further.")
-            return None
 
 
 # Global singleton — created once at module import time.
@@ -408,13 +382,13 @@ def __getattr__(name: str) -> str:
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 # --------------------------------------------------------------------
-# RETRY / ROTATION HELPER
+# RETRY BUDGETS
 # --------------------------------------------------------------------
-# Max retries equals the number of keys in the pool (try each key once),
-# with a floor of 3 attempts.
+# These are the only retry knobs.  A MAX_RETRIES constant used to sit here,
+# assigned from the key-pool size and never read by anything — three tests
+# patched it believing they were limiting retries.
 # --------------------------------------------------------------------
 
-MAX_RETRIES = max(key_manager.key_count, 3)
 DRAFT_MAX_ATTEMPTS = int(os.getenv("LLM_DRAFT_MAX_ATTEMPTS", "3"))
 VERIFIER_MAX_ATTEMPTS = int(os.getenv("LLM_VERIFIER_MAX_ATTEMPTS", "2"))
 
@@ -496,7 +470,6 @@ QA_MAX_TOKENS = int(os.getenv("QA_MAX_TOKENS", "3000"))
 # the module that actually applies it.  It was read here and never used.
 
 REFUSAL_STR = "Insufficient information in the provided context."
-MISSING_INFO_STR = "Information not present in the retrieved Harrison excerpt."
 SMART_SUMMARY_ACK = "Topic received — generating Harrison Smart Summary."
 
 
@@ -591,7 +564,7 @@ def verify_answer(
                     model_alias="gemini-primary",
                     temperature=0.0,
                     max_output_tokens=max_tokens,
-                    deadline_seconds=float(os.getenv("LLM_VERIFIER_DEADLINE_SECONDS", "30")),
+                    deadline_seconds=LLM_VERIFIER_DEADLINE_SECONDS,
                     stage=LLMStage.VERIFIER,
                 ),
                 "gemini-primary",
@@ -816,7 +789,7 @@ def ask_llm(
                     model_alias="gemini-primary",
                     temperature=0.2,
                     max_output_tokens=generation_max_tokens,
-                    deadline_seconds=float(os.getenv("LLM_DRAFT_DEADLINE_SECONDS", "30")),
+                    deadline_seconds=LLM_DRAFT_DEADLINE_SECONDS,
                     stage=LLMStage.DRAFT,
                 ),
                 "gemini-primary",

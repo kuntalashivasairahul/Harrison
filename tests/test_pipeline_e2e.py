@@ -105,7 +105,7 @@ class TestAskLlm4TupleConsistency(unittest.TestCase):
         """All LLM retries exhaust → 4-tuple with error_fallback."""
         with patch("backend.llm.llm.key_manager") as mock_km, \
              patch("backend.llm.llm.types") as mock_types, \
-             patch("backend.llm.llm.MAX_RETRIES", 1):
+             patch("backend.llm.llm.DRAFT_MAX_ATTEMPTS", 1):
             client = MagicMock()
             client.models.generate_content.side_effect = RuntimeError("test error")
             mock_km.next_client.return_value = client
@@ -158,7 +158,7 @@ class TestErrorFallbackSafety(unittest.TestCase):
     def test_error_fallback_answer_is_user_safe(self):
         with patch("backend.llm.llm.key_manager") as mock_km, \
              patch("backend.llm.llm.types") as mock_types, \
-             patch("backend.llm.llm.MAX_RETRIES", 1):
+             patch("backend.llm.llm.DRAFT_MAX_ATTEMPTS", 1):
             client = MagicMock()
             client.models.generate_content.side_effect = RuntimeError(
                 "429 RESOURCE_EXHAUSTED: Quota exceeded for model"
@@ -198,7 +198,7 @@ class TestVerifyAnswerVerificationRanFlag(unittest.TestCase):
     def test_exception_path_sets_ran_false(self):
         with patch("backend.llm.llm.key_manager") as mock_km, \
              patch("backend.llm.llm.types") as mock_types, \
-             patch("backend.llm.llm.MAX_RETRIES", 1):
+             patch("backend.llm.llm.DRAFT_MAX_ATTEMPTS", 1):
             client = MagicMock()
             client.models.generate_content.side_effect = RuntimeError("fail")
             mock_km.next_client.return_value = client
@@ -328,7 +328,7 @@ class TestAskLlmReturnPaths(unittest.TestCase):
 
         with patch("backend.llm.llm.key_manager") as mock_km, \
              patch("backend.llm.llm.types") as mock_types, \
-             patch("backend.llm.llm.MAX_RETRIES", 1):
+             patch("backend.llm.llm.DRAFT_MAX_ATTEMPTS", 1):
             client = MagicMock()
             client.models.generate_content.side_effect = fake_generate
             mock_km.next_client.return_value = client

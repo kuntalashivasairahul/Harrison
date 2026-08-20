@@ -110,8 +110,11 @@ extract_sources(chunks)   → List[str]
 resolve_page_urls(sources, base_url) → List[Dict[str, str]]
 fuse_context(chunks) → str
 clean_text(text) → str
-top_score(ranked_chunks) → float
 ```
+
+`top_score()` was previously listed here. It was removed once its last
+production caller disappeared from `api/main.py`; nothing but a test stub
+referenced it.
 
 ```
 ❌ FORBIDDEN: Adding logging, DB writes, or HTTP calls inside these functions.
@@ -292,10 +295,14 @@ curl http://127.0.0.1:8000/health
 
 ### 5.4 Evaluation Harness
 
-For changes to retrieval parameters (`DEFAULT_K`, `DEFAULT_FINAL_K`,
-`RERANK_SCORE_THRESHOLD`, `RRF_K`), run the evaluation harness in
-`evaluation/` before and after to confirm no regression in recall or
-precision metrics.
+For changes to retrieval parameters (`DEFAULT_K`, `DEFAULT_RERANK_POOL`,
+`RERANK_SCORE_THRESHOLD`, `RRF_K`) **or to retrieval behaviour** — the
+tokenizer, the low-value filter, neighbour expansion, fusion ordering — run
+`scripts/evaluate_rag.py` before and after to confirm no regression in recall
+or precision.
+
+This rule previously named only the parameters. Behavioural changes to the same
+pipeline have at least as much effect and were not covered.
 
 ---
 

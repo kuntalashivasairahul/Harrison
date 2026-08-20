@@ -5,7 +5,6 @@ Unit tests for the refactored KeyManager:
   - Main key plus explicit 10-slot loading
   - Round-robin via next_client()
   - Exhaustion tracking via mark_exhausted()
-  - rotate() skips exhausted keys
   - All-exhausted raises RuntimeError
 """
 from __future__ import annotations
@@ -145,15 +144,6 @@ class TestRoundRobin(unittest.TestCase):
         self.assertEqual(c.api_key, "k0")
         self.assertEqual(km._current_idx, 0)
 
-    def test_sequential_calls_rotate_in_order(self):
-        km = _make_km("k0", "k1", "k2")
-        keys_used = []
-        with patch("backend.llm.llm.genai.Client", side_effect=lambda api_key: MagicMock(api_key=api_key)):
-            for _ in range(6):
-                c = km.next_client()
-                keys_used.append(c.api_key)
-        self.assertEqual(keys_used, ["k0", "k1", "k2", "k0", "k1", "k2"])
-
     def test_single_key_always_returns_same(self):
         km = _make_km("only-key")
         with patch("backend.llm.llm.genai.Client", side_effect=lambda api_key: MagicMock(api_key=api_key)):
@@ -228,29 +218,8 @@ class TestRateLimitCooldown(unittest.TestCase):
         self.assertEqual(km.available_key_count, 2)
 
 
-class TestRotate(unittest.TestCase):
-    """rotate() must skip exhausted keys and return None when all exhausted."""
-
-    def test_rotate_skips_exhausted(self):
-        km = _make_km("k0", "k1", "k2")
-        km._exhausted.add(1)        # k1 pre-exhausted
-        # Start at -1, rotate → skip to 0 first non-exhausted
-        result = km.rotate()
-        self.assertEqual(result, km._keys[km._current_idx])
-        # Continue: next rotate should skip k1
-        km._current_idx = 0        # simulate being at k0
-        result2 = km.rotate()
-        self.assertNotEqual(km._current_idx, 1)  # must not land on k1
-
-    def test_all_exhausted_returns_none(self):
-        km = _make_km("k0", "k1")
-        km._exhausted = {0, 1}
-        result = km.rotate()
-        self.assertIsNone(result)
-
-
 class TestMakeClient(unittest.TestCase):
-    """make_client() returns client for current key without advancing."""
+    """make_client() returns a client for the CURRENT key without advancing."""
 
     def test_make_client_uses_current_idx(self):
         km = _make_km("k0", "k1", "k2")

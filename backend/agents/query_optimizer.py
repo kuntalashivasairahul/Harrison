@@ -29,7 +29,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 from pathlib import Path
 from typing import TypedDict
@@ -42,6 +41,7 @@ from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
+from backend.config import LLM_OPTIMIZER_DEADLINE_SECONDS
 from backend.llm.contracts import LLMRequest, LLMStage
 from backend.llm.llm import llm_router
 
@@ -302,7 +302,7 @@ def optimize_query(raw_query: str) -> OptimizedQuery:
                 model_alias="optimizer",
                 temperature=_TEMPERATURE,
                 max_output_tokens=_MAX_TOKENS,
-                deadline_seconds=float(os.getenv("LLM_OPTIMIZER_DEADLINE_SECONDS", "8")),
+                deadline_seconds=LLM_OPTIMIZER_DEADLINE_SECONDS,
                 stage=LLMStage.OPTIMIZER,
             )
         )
