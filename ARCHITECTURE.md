@@ -11,117 +11,53 @@
 
 ## 1. End-to-End Pipeline
 
-The complete request lifecycle for a single `/ask` call:
+The request lifecycle for `/ask` is:
 
-```
-┌──────────────────────────────────────────────────────────────────────────┐
-│                          POST /ask  (FastAPI)                            │
-│                    { query: str, mode: "qa"|"smart_summary" }            │
-└─────────────────────────────────┬────────────────────────────────────────┘
-                                  │
-                    ┌─────────────▼──────────────┐
-                    │      1. Query Expansion      │
-                    │  expand_query(max_queries=4) │
-                    │  → always includes original  │
-                    │  → up to 3 rule-based paraphrases│
-                    └─────────────┬──────────────┘
-                                  │  List[str]  (≤ 4 queries)
-                    ┌─────────────▼──────────────┐
-                    │   2. Hybrid Retrieval (×N)  │
-                    │   FAISS (dense ANN, k=30)   │
-                    │      +                      │
-                    │   BM25Okapi (lexical, k=30) │
-                    │   — per expanded query —    │
-                    └─────────────┬──────────────┘
-                                  │  List[Dict]  (raw candidates)
-                    ┌─────────────▼──────────────┐
-                    │   3. RRF Fusion  (K = 60)   │
-                    │  Merge + deduplicate by     │
-                    │  chunk_id across all queries │
-                    │  RRF score = Σ 1/(K+rank)   │
-                    └─────────────┬──────────────┘
-                                  │  merged List[Dict]
-                    ┌─────────────▼──────────────┐
-                    │  4. Low-Value Chunk Filter  │
-                    │  Drop: figure captions,     │
-                    │  references, <20 char lines │
-                    └─────────────┬──────────────┘
-                                  │
-                    ┌─────────────▼──────────────┐
-                    │  5. Neighbor Chunk Expansion│
-                    │  For each top chunk, add    │
-                    │  chunk_id ± 1 (if not duped)│
-                    │  Cap at rerank_pool size    │
-                    └─────────────┬──────────────┘
-                                  │  rerank pool (≤ 24 chunks)
-                    ┌─────────────▼──────────────┐
-                    │  6. Cross-Encoder Reranking │
-                    │  ms-marco-MiniLM-L-6-v2     │
-                    │  Scores: raw logits          │
-                    │  top_n = final_k (6 or 12)  │
-                    └─────────────┬──────────────┘
-                                  │
-                    ┌─────────────▼──────────────┐
-                    │  7. Hard Score Filter ⚠️    │
-                    │  RERANK_SCORE_THRESHOLD=-2.0│
-                    │  Drop chunks below threshold │
-                    │  → IMMUTABLE SAFETY GATE ←  │
-                    └─────────────┬──────────────┘
-                                  │  final_chunks: List[Dict]
-                    ┌─────────────▼──────────────┐
-                    │   8. Context Fusion         │
-                    │   fuse_context(chunks)      │
-                    │   Assembles fused_context   │
-                    │   string for LLM prompt     │
-                    └─────────────┬──────────────┘
-                                  │
-                    ┌─────────────▼──────────────┐
-                    │  9. Evidence Extraction     │
-                    │  extract_evidence(chunks)   │
-                    │  → EVIDENCE: <stmt> [p:NNN] │
-                    │  extract_sources(chunks)    │
-                    │  → ["p.142", "p.512", ...]  │
-                    └─────────────┬──────────────┘
-                                  │
-                    ┌─────────────▼──────────────┐
-                    │  10. Page URL Resolution    │
-                    │  resolve_page_urls(sources) │
-                    │  → thumbnail_url + full_url │
-                    │  → IMMUTABLE: visual ground │
-                    └─────────────┬──────────────┘
-                                  │
-                    ┌─────────────▼──────────────┐
-                    │  11. LLM Generation (Groq)  │
-                    │  ask_llm(context, question, │
-                    │          mode, evidence)    │
-                    │  model: llama-3.3-70b       │
-                    │  temp: 0.1 (ss) / 0.2 (qa) │
-                    └─────────────┬──────────────┘
-                                  │  draft_answer: str
-                    ┌─────────────▼──────────────┐
-                    │  12. Conditional Verify ⚠️  │
-                    │  verify_answer() — ALWAYS   │
-                    │  runs unless REFUSAL_STR    │
-                    │  temp=0.0, grounded rewrite │
-                    │  → IMMUTABLE SAFETY GATE ←  │
-                    └─────────────┬──────────────┘
-                                  │  verified_answer: str
-                    ┌─────────────▼──────────────┐
-                    │  13. Confidence Scoring     │
-                    │  calculate_confidence(      │
-                    │    top_reranker_score,      │
-                    │    evidence_count,          │
-                    │    was_verified)            │
-                    │  → "High" | "Medium" | "Low"│
-                    └─────────────┬──────────────┘
-                                  │
-                    ┌─────────────▼──────────────┐
-                    │   14. Final JSON Response   │
-                    │   QueryResponse schema:     │
-                    │   { answer, confidence,     │
-                    │     sources, visual_context }│
-                    └────────────────────────────┘
-```
+1. `optimize_query()` calls the approved router: Groq first when explicitly enabled, Gemini Flash-Lite second, then a deterministic local fallback. It classifies the query, rejects non-medical requests, expands the search query, and labels complexity. This is the **only** query-expansion stage; the rule-based `expand_query()` that used to fan retrieval out over four templated variants has been removed.
+2. The API embeds the search query with `BAAI/bge-m3` and checks the semantic cache against exact runtime metadata.
+3. A cache miss runs a single hybrid FAISS/BM25 pass, RRF fusion (`RRF_K=60`), neighbor expansion (restricted to chunks within one page of their parent), cross-encoder reranking, and the `RERANK_SCORE_THRESHOLD=-3.0` hard filter.
+4. `route_and_sort_context()` deduplicates and page-orders chunks; `fuse_context()` constructs the prompt context within `SMART_SUMMARY_CONTEXT_CHAR_LIMIT` (default 12,000 characters).
+
+   **Ordering contract:** fusion selects which chunks survive the budget in
+   descending cross-encoder score, then emits the survivors in page order.
+   Selecting in page order instead — as it previously did — makes the budget
+   discard the highest-numbered pages rather than the least relevant chunks,
+   silently dropping the top-ranked chunk whenever it came from late in the
+   textbook.
+5. Evidence and source labels are extracted from the retrieved chunks.
+6. `ask_llm()` uses the stage-aware router, which tries every deployment
+   registered for the stage in priority order — `gemini-primary`, then
+   `gemini-draft-fallback` on a different Gemini model. A provider-side outage
+   on one model no longer fails the request. `KeyManager` uses `GEMINI_API_KEY` plus `GEMINI_API_KEY_1` through `_10` as distinct round-robin projects and temporarily cools down individual projects after quota responses.
+7. Unless `disable_verifier` is requested, `verify_answer()` performs a grounded Gemini rewrite at temperature `0.0`. A complete verified response is the only response eligible for semantic-cache persistence.
+8. `backend/agents/confidence_scorer.py` scores the final response from average cross-encoder relevance and draft-to-verified length divergence; return-path and truncation caps are then applied by the API.
+9. Source labels are resolved into page-image URLs and returned with timing data in `QueryResponse`.
+
+---
+
+## 1a. Import-Time Purity
+
+No module under `backend/` may do expensive or networked work at import time.
+Specifically:
+
+- `backend/retrieval/rag.py` loads `chunks.json`, the FAISS index, and the BM25
+  index **on first access**, via PEP 562 `__getattr__`. `rag.warmup()` forces it.
+- `backend/retrieval/embeddings.py` constructs the BGE-M3 encoder on first call
+  to `get_model()`. `warmup()` forces it.
+- `backend/llm/llm.py` resolves `PROD_MODEL` / `BACKUP_MODEL` through
+  `resolve_models()` on first use, not at import. Reading the module attributes
+  still works and triggers resolution lazily.
+
+All of it is forced deliberately in the FastAPI `lifespan` handler, so startup
+pays the cost once and the first request does not. This is what keeps the test
+suite hermetic and fast — importing `backend.api.main` costs ~0.2s with the
+heavy modules stubbed, and the full suite runs in ~3s with no network access.
+
+`backend/logging_config.py` must be imported and `configure_logging()` called
+**before** any other `backend.*` import in an entry point, so that diagnostics
+emitted during module import are captured. Modules obtain loggers with
+`logging.getLogger(__name__)`; reaching for `"uvicorn.error"` re-hides the
+problem that module exists to solve.
 
 ---
 
@@ -134,12 +70,14 @@ renamed, removed, or re-typed without a full migration plan.
 class QueryRequest(BaseModel):
     query: str
     mode: Literal["qa", "smart_summary"] = "smart_summary"
+    disable_verifier: bool = False
 
 class QueryResponse(BaseModel):
     answer:         str                   # Verified LLM answer
     confidence:     str                   # "High" | "Medium" | "Low"
     sources:        List[str]             # e.g. ["p.142", "p.512"]
     visual_context: List[Dict[str, str]]  # [{page_label, thumbnail_url, full_url}]
+    timings:        Dict[str, float]      # stage durations in seconds
 ```
 
 **Immutability rules:**
@@ -161,15 +99,17 @@ Harrison/                              ← Project root
 │   │
 │   ├── retrieval/
 │   │   ├── rag.py                     ← Core retrieval pipeline:
-│   │   │                                expand_query(), _hybrid_candidates(),
-│   │   │                                _pretrim_for_rerank(), retrieve()
-│   │   │                                RERANK_SCORE_THRESHOLD defined here
-│   │   ├── rerank.py                  ← CrossEncoder wrapper: rerank(), top_score()
+│   │   │                                _hybrid_candidates(), _pretrim_for_rerank(),
+│   │   │                                retrieve(); lazy vectorstore via warmup()
+│   │   │                                Uses RERANK_SCORE_THRESHOLD from config.py
+│   │   ├── rerank.py                  ← CrossEncoder wrapper: rerank(), warmup_reranker()
 │   │   └── embeddings.py              ← embed_text() — FAISS query embedding
 │   │
 │   ├── llm/
-│   │   └── llm.py                     ← ask_llm(), verify_answer()
-│   │                                    BASE_QA_PROMPT, SMART_SUMMARY_PROMPT defined here
+│   │   ├── llm.py                     ← ask_llm(), verify_answer(), Gemini key management
+│   │   ├── router.py                  ← approved deployment routing and cooldown state
+│   │   ├── contracts.py               ← provider-neutral request/result/error contracts
+│   │   └── model_registry.json        ← Stage 1 provider allowlist
 │   │                                    REFUSAL_STR sentinel defined here
 │   │
 │   ├── processing/
@@ -180,20 +120,27 @@ Harrison/                              ← Project root
 │   │   └── page_resolver.py           ← resolve_page_urls()
 │   │                                    URL constructor only; no disk I/O
 │   │
-│   ├── utils/
-│   │   ├── fusion.py                  ← fuse_context(), clean_text()
-│   │   └── scoring.py                 ← calculate_confidence()
+│   ├── agents/
+│   │   └── confidence_scorer.py       ← calculate_confidence()
 │   │                                    Pure function; no I/O
 │   │
-│   ├── config.py                      ← Global path & model constants
-│   ├── requirements.txt               ← Python dependencies
+│   ├── utils/
+│   │   └── fusion.py                  ← fuse_context(), clean_text()
+│   │
+│   ├── config.py                      ← Paths, models, retrieval + deadline constants
+│   │                                    Deadlines read the environment HERE; call
+│   │                                    sites import them, never os.getenv directly
+│   ├── logging_config.py              ← configure_logging(); call before backend imports
+│   ├── observability.py               ← request-id context, RequestIdFilter, metrics
+│   ├── requirements.txt               ← Pinned runtime dependencies
+│   ├── requirements-dev.txt           ← Test/lint dependencies
 │   └── .env                           ← Secrets (git-ignored)
 │
 ├── artifacts/                         ← Runtime data — DO NOT SCAN
 │   ├── vectorstore/
 │   │   ├── index.faiss                ← FAISS index (binary)
 │   │   └── chunks.json                ← Chunk metadata (text, page, chunk_id)
-│   └── retrieval_logs/                ← Per-query JSON diagnostics (auto-written)
+│   └── retrieval_logs/                ← Per-query diagnostics (opt-in, capped, query withheld)
 │
 ├── storage/                           ← Static media — DO NOT SCAN
 │   └── pages/
@@ -216,9 +163,9 @@ api/main.py
     ├── retrieval/rag.py          (retrieve)
     ├── utils/fusion.py           (fuse_context)
     ├── processing/evidence.py    (extract_evidence, extract_sources)
-    ├── llm/llm.py                (ask_llm, REFUSAL_STR)
-    ├── retrieval/rerank.py       (top_score)
-    ├── utils/scoring.py          (calculate_confidence)
+    ├── llm/llm.py                (ask_llm, resolve_models)
+    ├── observability.py          (metrics, request ids)
+    ├── agents/confidence_scorer.py (calculate_confidence)
     └── rendering/page_resolver.py (resolve_page_urls)
 
 retrieval/rag.py
@@ -233,7 +180,7 @@ retrieval/rerank.py
     └── sentence_transformers     (CrossEncoder)
 
 llm/llm.py
-    └── groq                      (Groq client)
+    └── google.genai              (Gemini client and types)
 
 processing/evidence.py
     └── utils/fusion.py           (clean_text)
@@ -260,20 +207,35 @@ appear in only one index receive only one term.
 
 | Condition                                                      | Label      |
 |----------------------------------------------------------------|------------|
-| `was_verified == False`                                        | **Low**    |
-| `top_reranker_score < 1.0`                                     | **Low**    |
-| `top_reranker_score ≥ 5.0 AND evidence_count ≥ 2`             | **High**   |
-| Everything else                                                | **Medium** |
+| No retrieved chunks, or half or more carry no usable cross-encoder score | **Low**  |
+| Average score `< -2.0`                                          | **Low**  |
+| Draft-to-verified length divergence `> 0.40`                    | **Low**  |
+| Average score `>= -0.5`, at least two scored chunks, none unscored | **High** |
+| Everything else                                                 | **Medium** |
 
 ### 5.3 Hard Filter Threshold
 
 ```python
-RERANK_SCORE_THRESHOLD = -2.0  # raw ms-marco-MiniLM logit
+RERANK_SCORE_THRESHOLD = -3.0  # raw ms-marco-MiniLM logit
 ```
 
 Chunks scoring below this value are dropped **after** reranking but **before**
-context fusion. This is not configurable at the API layer — it is a safety
-constant in `backend/retrieval/rag.py`.
+context fusion. It is defined in `backend/config.py` and used by
+`backend/retrieval/rag.py`; it is not configurable at the API layer.
+
+---
+
+## 5.4 Endpoints
+
+| Method | Path | Auth | Notes |
+|---|---|---|---|
+| `POST` | `/ask` | none | Rate-limited per client. `query` bounded to `HARRISON_MAX_QUERY_CHARS` (2000). |
+| `GET` | `/health` | none | **503** when degraded, 200 when ok. Never rate-limited. |
+| `GET` | `/metrics` | none | Counters and p50/p95 per pipeline stage, in-process. |
+| `DELETE` | `/admin/cache` | `X-Admin-Token` | 503 when `HARRISON_ADMIN_TOKEN` is unset — closed by default, not open. |
+
+Every response carries `X-Request-ID`; a supplied one is echoed back so a
+caller's trace id survives into the logs.
 
 ---
 
@@ -309,11 +271,11 @@ draft_answer  ──→  verify_answer(draft, context, mode, model)  ──→  
 - Called with `temperature=0.0` (deterministic).
 - Instruction: keep supported claims, rewrite partial claims, remove
   unsupported claims. **Never invent** new page numbers.
-- Skipped **only** when `ask_llm()` returns `REFUSAL_STR` or an LLM error
-  sentinel — both of which are already safe non-answers.
-- The `was_verified` flag in `calculate_confidence()` is set to `True` when
-  the answer is neither `REFUSAL_STR` nor an `"LLM call failed:"` prefix.
+- Bypassed when the request sets `disable_verifier=true`; otherwise the
+  verifier retries quota failures using the Gemini key pool.
+- A complete verified answer is cacheable. Draft fallbacks, disabled
+  verification, and truncated responses are not persisted in the semantic cache.
 
 ---
 
-*Last updated: 2026-05-30 | Maintainer: HarrisonGPT AI Governance*
+*Last updated: 2026-08-21 | Maintainer: HarrisonGPT AI Governance*

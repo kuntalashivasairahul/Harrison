@@ -1,0 +1,11 @@
+*.faiss filter=lfs diff=lfs merge=lfs -text
+artifacts/vectorstore/chunks.json filter=lfs diff=lfs merge=lfs -text
+data/*.md filter=lfs diff=lfs merge=lfs -text
+
+# Why: these artifacts are large binaries that change wholesale on every index
+# rebuild, so each rebuild used to add its full size to git history forever.
+# LFS stores a ~130-byte pointer in the repo and the payload out of band.
+#
+# History was NOT rewritten — the 158 MB already committed stays where it is.
+# This stops the bleeding going forward; it does not shrink the past. Anyone
+# cloning needs git-lfs installed (`brew install git-lfs && git lfs install`).

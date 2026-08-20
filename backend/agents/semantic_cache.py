@@ -28,12 +28,22 @@ Each entry is a JSON object with three keys:
 .. code-block:: json
 
     {
-        "embedding": [0.12, -0.34, ...],   // float list, 384 dims (MiniLM)
+        "embedding": [0.12, -0.34, ...],   // float list from the live embedding model
+        "metadata": {                       // exact-match cache signature
+            "mode": "qa",
+            "embedding_model": "BAAI/bge-m3",
+            "embedding_dim": 1024
+        },
         "response":  {                      // exact QueryResponse payload
             "answer": "...",
             "confidence": "High",
             "sources": ["p.142"],
             "visual_context": [...]
+        },
+        "audit": {                          // non-keyed request/debug metadata
+            "raw_query": "...",
+            "search_query": "...",
+            "returned_path": "verified"
         },
         "hits": 3                           // times this entry was served
     }
@@ -43,13 +53,9 @@ Limitations
 - The cache is a flat list; lookup is O(n).  At a few hundred entries this
   is negligible (<1 ms).  If the cache grows very large (>10 000 entries)
   consider switching to FAISS or a vector DB for the lookup.
-- The cache is keyed by embedding only (not ``mode``).  A ``qa`` and a
-  ``smart_summary`` request for the same query will share a cache entry only
-  when their embeddings happen to cross the 0.95 threshold.  In practice
-  they will not collide because ``search_query`` is identical but the callers
-  that construct the entry will always be of matching mode in normal use.
-  If strict mode-isolation is needed, prefix the embedding with a mode bit
-  before computing similarity.
+- Cache callers should pass exact-match metadata for mode, verifier state,
+  model dimensions, and retrieval/prompt versions.  Semantic similarity is
+  evaluated only after that signature matches.
 """
 
 from __future__ import annotations
@@ -58,7 +64,6 @@ import json
 import logging
 import threading
 from pathlib import Path
-from typing import Dict, List, Optional
 
 import numpy as np
 
@@ -84,29 +89,6 @@ _CACHE_FILE   = _CACHE_DIR / "semantic_cache.json"
 
 
 # ---------------------------------------------------------------------------
-# Cosine similarity helper
-# ---------------------------------------------------------------------------
-
-def _cosine_similarity(a: List[float], b: List[float]) -> float:
-    """
-    Compute the cosine similarity between two equal-length float lists.
-
-    Returns a value in [-1.0, 1.0].  Returns 0.0 on any numerical error
-    (e.g. zero-norm vectors) so a bad vector never triggers a false cache hit.
-    """
-    va = np.array(a, dtype=np.float32)
-    vb = np.array(b, dtype=np.float32)
-
-    norm_a = float(np.linalg.norm(va))
-    norm_b = float(np.linalg.norm(vb))
-
-    if norm_a == 0.0 or norm_b == 0.0:
-        return 0.0
-
-    return float(np.dot(va, vb) / (norm_a * norm_b))
-
-
-# ---------------------------------------------------------------------------
 # SemanticCache
 # ---------------------------------------------------------------------------
 
@@ -128,13 +110,13 @@ class SemanticCache:
 
         embedding = embed_text(search_query).flatten().tolist()
 
-        hit = cache.check_cache(embedding)
+        hit = cache.check_cache(embedding, metadata=cache_signature)
         if hit:
             return QueryResponse(**hit)
 
         # ... run full pipeline ...
 
-        cache.save_to_cache(embedding, response_payload)
+        cache.save_to_cache(embedding, response_payload, metadata=cache_signature)
 
     Thread safety
     -------------
@@ -144,7 +126,7 @@ class SemanticCache:
     """
 
     def __init__(self) -> None:
-        self._entries: List[Dict] = []
+        self._entries: list[dict] = []
         self._lock = threading.Lock()
         self._load_from_disk()
 
@@ -211,8 +193,12 @@ class SemanticCache:
         """
         try:
             tmp_path = _CACHE_FILE.with_suffix(".tmp")
+            # No indent: each entry carries a 1024-float embedding, and
+            # pretty-printing puts every float on its own line — that alone
+            # took the file from ~4 MB to ~14.6 MB at MAX_CACHE_ENTRIES, all
+            # of it rewritten on every save inside the request path.
             tmp_path.write_text(
-                json.dumps(self._entries, ensure_ascii=False, indent=2),
+                json.dumps(self._entries, ensure_ascii=False, separators=(",", ":")),
                 encoding="utf-8",
             )
             tmp_path.replace(_CACHE_FILE)  # atomic on POSIX; near-atomic on Windows
@@ -223,7 +209,18 @@ class SemanticCache:
     # Public API
     # ------------------------------------------------------------------
 
-    def check_cache(self, query_embedding: List[float]) -> Optional[Dict]:
+    @staticmethod
+    def _metadata_matches(entry: dict, metadata: dict | None) -> bool:
+        """Return True when ``entry`` is eligible for a request signature."""
+        if metadata is None:
+            return True
+        return entry.get("metadata") == metadata
+
+    def check_cache(
+        self,
+        query_embedding: list[float],
+        metadata: dict | None = None,
+    ) -> dict | None:
         """
         Search for a cached response whose embedding is semantically similar
         to ``query_embedding``.
@@ -233,6 +230,9 @@ class SemanticCache:
         query_embedding:
             A flat float list (e.g. produced by
             ``embed_text(search_query).flatten().tolist()``).
+        metadata:
+            Exact-match cache signature.  Entries with missing or different
+            metadata are skipped before semantic similarity is computed.
 
         Returns
         -------
@@ -245,22 +245,41 @@ class SemanticCache:
             return None
 
         best_sim: float = -1.0
-        best_response: Optional[Dict] = None
+        best_response: dict | None = None
         best_idx: int = -1
 
-        for idx, entry in enumerate(self._entries):
-            stored_emb = entry.get("embedding")
-            if not stored_emb:
-                continue
-            try:
-                sim = _cosine_similarity(query_embedding, stored_emb)
-            except Exception:
-                continue
+        # Score every eligible entry in one matmul.  A previous implementation
+        # looped a per-pair cosine helper, rebuilding a NumPy array from the
+        # *query* list once per stored entry instead of once per request.
+        try:
+            dim = len(query_embedding)
+            eligible = [
+                (idx, entry)
+                for idx, entry in enumerate(self._entries)
+                if self._metadata_matches(entry, metadata)
+                and isinstance(entry.get("embedding"), list)
+                and len(entry["embedding"]) == dim
+            ]
+            if not eligible:
+                log.debug("SemanticCache: MISS (no entry matches the request signature)")
+                return None
 
-            if sim > best_sim:
-                best_sim = sim
-                best_response = entry.get("response")
-                best_idx = idx
+            query_vec = np.asarray(query_embedding, dtype=np.float32)
+            matrix = np.asarray([entry["embedding"] for _, entry in eligible], dtype=np.float32)
+
+            query_norm = float(np.linalg.norm(query_vec))
+            row_norms = np.linalg.norm(matrix, axis=1)
+            denom = row_norms * query_norm
+            with np.errstate(divide="ignore", invalid="ignore"):
+                sims = np.where(denom > 0, matrix @ query_vec / denom, 0.0)
+
+            best_row = int(np.argmax(sims))
+            best_sim = float(sims[best_row])
+            best_idx = eligible[best_row][0]
+            best_response = eligible[best_row][1].get("response")
+        except Exception as exc:
+            log.warning("SemanticCache: similarity scan failed (%s) — treating as MISS.", exc)
+            return None
 
         if best_sim >= SIMILARITY_THRESHOLD and best_response is not None:
             log.info(
@@ -288,8 +307,10 @@ class SemanticCache:
 
     def save_to_cache(
         self,
-        query_embedding: List[float],
-        response_data: Dict,
+        query_embedding: list[float],
+        response_data: dict,
+        metadata: dict | None = None,
+        audit_data: dict | None = None,
     ) -> None:
         """
         Persist a new cache entry to memory and disk.
@@ -301,6 +322,10 @@ class SemanticCache:
         response_data:
             Dict with keys matching ``QueryResponse`` fields:
             ``answer``, ``confidence``, ``sources``, ``visual_context``.
+        metadata:
+            Exact-match cache signature required for future hits.
+        audit_data:
+            Optional non-keyed metadata for debugging cache entries.
 
         The method is a no-op on any error so the caller is never interrupted.
         """
@@ -308,14 +333,19 @@ class SemanticCache:
             return
 
         try:
-            new_entry: Dict = {
+            new_entry: dict = {
                 "embedding": query_embedding,
+                "metadata": metadata or {},
+                # visual_context is intentionally NOT stored: it contains
+                # absolute URLs built from the requesting host, and a cached
+                # entry served behind a different host would hand back links
+                # to the old one.  Callers rebuild it from "sources".
                 "response": {
-                    "answer":         response_data.get("answer", ""),
-                    "confidence":     response_data.get("confidence", "Low"),
-                    "sources":        response_data.get("sources", []),
-                    "visual_context": response_data.get("visual_context", []),
+                    "answer":     response_data.get("answer", ""),
+                    "confidence": response_data.get("confidence", "Low"),
+                    "sources":    response_data.get("sources", []),
                 },
+                "audit": audit_data or {},
                 "hits": 0,
             }
 

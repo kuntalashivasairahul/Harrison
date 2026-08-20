@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Tests are hermetic and never read the index, so skip the LFS
+          # payload — it would add ~100 MB to every CI run for nothing.
+          lfs: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements-dev.txt
+
+      - name: Lint
+        run: ruff check backend/ tests/
+
+      - name: Test
+        # The suite is fully hermetic: no network, no model weights, no index.
+        # If this step starts needing credentials, something regressed.
+        env:
+          GEMINI_API_KEY: ""
+          GROQ_API_KEY: ""
+          GROQ_ENABLED: "false"
+        run: pytest

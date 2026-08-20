@@ -21,21 +21,19 @@ Guarantees (CODING_RULES.md §1, §2, §3)
 - No medical claims are invented — the agent only rewrites the *query*, not
   the *answer*.
 - No imports from ``retrieval/``, ``llm/``, ``api/``, or ``rendering/``.
-  This module depends only on ``groq``, the standard library, and
-  ``backend/.env``.
+This module delegates optional LLM work to the approved stage router and
+always retains a deterministic local fallback.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 from pathlib import Path
 from typing import TypedDict
 
 from dotenv import load_dotenv
-from groq import Groq
 
 # ---------------------------------------------------------------------------
 # Environment & client setup
@@ -43,17 +41,16 @@ from groq import Groq
 
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
-_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+from backend.config import LLM_OPTIMIZER_DEADLINE_SECONDS
+from backend.llm.contracts import LLMRequest, LLMStage
+from backend.llm.llm import llm_router
 
-# Fast, low-latency model — 8 k context is ample for query expansion.
-# llama-3.1-8b-instant is Groq's current recommended low-latency 8B model.
-_OPTIMIZER_MODEL = "llama-3.1-8b-instant"
+# The optimizer only needs a small JSON object, but the approved Groq model is
+# a reasoning model: it spends tokens on an internal chain before emitting the
+# answer.  At 256 the budget was consumed by reasoning and the response came
+# back with finish_reason="length" and empty content on every clinical query.
+_MAX_TOKENS = 512
 
-# Keep expansion tokens tight — we only need a small JSON object.
-_MAX_TOKENS = 256
-
-# Single-attempt timeout guard: Groq client raises on its own timeout;
-# we catch broadly so the fallback path is always reached.
 _TEMPERATURE = 0.0  # Deterministic — query rewriting must be stable.
 
 log = logging.getLogger(__name__)
@@ -298,51 +295,28 @@ def optimize_query(raw_query: str) -> OptimizedQuery:
         return _build_fallback("")
 
     try:
-        response = _client.chat.completions.create(
-            model=_OPTIMIZER_MODEL,
-            messages=[
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user", "content": _USER_TEMPLATE.format(raw_query=raw_query)},
-            ],
-            temperature=_TEMPERATURE,
-            max_tokens=_MAX_TOKENS,
-        )
-
-        raw_content: str = response.choices[0].message.content or ""
-        payload = _extract_json(raw_content)
-
-        if payload is None:
-            log.warning(
-                "QueryOptimizer: LLM returned unparseable content: %r — "
-                "falling back to original query.",
-                raw_content[:120],
+        result = llm_router.optimize(
+            LLMRequest(
+                prompt=_USER_TEMPLATE.format(raw_query=raw_query),
+                system_instruction=_SYSTEM_PROMPT,
+                model_alias="optimizer",
+                temperature=_TEMPERATURE,
+                max_output_tokens=_MAX_TOKENS,
+                deadline_seconds=LLM_OPTIMIZER_DEADLINE_SECONDS,
+                stage=LLMStage.OPTIMIZER,
             )
+        )
+        raw_content = result.text
+        payload = _extract_json(raw_content)
+        if payload is None:
+            log.warning("QueryOptimizer: optimizer_failed=True fallback_to_original_query=True reason=unparseable_response provider=%s", result.provider)
             return _build_fallback(raw_query)
-
         validated = _validate_payload(payload, raw_query)
         if validated is None:
-            log.warning(
-                "QueryOptimizer: LLM payload failed schema validation: %r — "
-                "falling back to original query.",
-                payload,
-            )
+            log.warning("QueryOptimizer: optimizer_failed=True fallback_to_original_query=True reason=schema_validation_failed provider=%s", result.provider)
             return _build_fallback(raw_query)
-
-        log.debug(
-            "QueryOptimizer: '%s' → '%s' (focus=%s, complexity=%s, medical=%s)",
-            raw_query,
-            validated["expanded_query"],
-            validated["focus"],
-            validated["complexity"],
-            validated["is_medical_query"],
-        )
+        log.info("QueryOptimizer: optimizer_used=True provider=%s model=%s '%s' -> '%s' focus=%s complexity=%s medical=%s", result.provider, result.model, raw_query, validated["expanded_query"], validated["focus"], validated["complexity"], validated["is_medical_query"])
         return validated
-
     except Exception as exc:  # noqa: BLE001
-        log.warning(
-            "QueryOptimizer: LLM call failed (%s: %s) — falling back to "
-            "original query.",
-            type(exc).__name__,
-            exc,
-        )
+        log.warning("QueryOptimizer: optimizer_failed=True fallback_to_original_query=True reason=exception exc_type=%s exc=%s", type(exc).__name__, exc)
         return _build_fallback(raw_query)

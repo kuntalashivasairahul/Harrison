@@ -38,15 +38,30 @@ citation grounding over raw creativity.**
 
 - **Hardware target**: Apple Silicon (M4) — fully native, no CUDA dependency.
 - **Vector index**: FAISS (CPU) loaded from `artifacts/vectorstore/index.faiss`.
-- **Lexical index**: BM25Okapi (rank-bm25) built in-memory at startup from
-  `artifacts/vectorstore/chunks.json`.
+- **Lexical index**: BM25Okapi (rank-bm25) built in-memory from
+  `artifacts/vectorstore/chunks.json`, **lazily on first use** and forced during
+  the FastAPI `lifespan` warm-up. Tokenization is punctuation-aware.
 - **Serving**: FastAPI + Uvicorn, live at `http://127.0.0.1:8000`.
 - **Visual grounding**: Pre-rendered Harrison page images served as static
   files from `storage/pages/` via the `/pages` StaticFiles mount.
-- **Confidence scoring**: Fully operational (High / Medium / Low) based on
-  cross-encoder scores, evidence count, and verification status.
-- **Verification layer**: `verify_answer()` runs unconditionally on every
-  non-refusal LLM response.
+- **Confidence scoring**: Fully operational (High / Medium / Low) from average
+  cross-encoder score, draft-to-verified divergence, and the count of chunks
+  with no usable score. Capped by the return path and by truncation in the API.
+- **Verification layer**: `verify_answer()` runs on every non-refusal response
+  unless the request sets `disable_verifier`. Thinking is disabled for this
+  stage — Gemini 2.5 spends `max_output_tokens` on an internal reasoning pass,
+  which used to truncate the verifier and force a `draft_fallback` on every
+  smart summary.
+- **Draft resilience**: the draft and verifier stages fail over across
+  deployments in priority order (`gemini-primary` -> `gemini-draft-fallback`,
+  a different Gemini model). Eligible failures: rate limit, timeout,
+  unavailable, and model-not-found.
+- **Observability**: `backend/logging_config.py` makes `backend.*` logs visible
+  under uvicorn; every request carries an `X-Request-ID`; `/metrics` exposes
+  counters and p50/p95 per stage.
+- **Test suite**: 252 hermetic tests, ~4s, on `.venv312`. No network, no model
+  weights, no index. There is no integration tier yet — that is the largest
+  outstanding gap in the project.
 
 ---
 
@@ -67,20 +82,27 @@ citation grounding over raw creativity.**
 |------------------------|------------------------------------------|---------------------------------|
 | `faiss-cpu`            | Dense vector search (ANN)                | `backend/retrieval/rag.py`      |
 | `rank-bm25`            | Sparse lexical search (BM25Okapi)        | `backend/retrieval/rag.py`      |
-| `sentence-transformers`| Embedding (`all-MiniLM-L6-v2`) + Cross-Encoder (`ms-marco-MiniLM-L-6-v2`) | `backend/retrieval/embeddings.py`, `backend/retrieval/rerank.py` |
+| `sentence-transformers`| Embedding (`BAAI/bge-m3`, 1024 dimensions) + Cross-Encoder (`ms-marco-MiniLM-L-6-v2`) | `backend/retrieval/embeddings.py`, `backend/retrieval/rerank.py` |
 
 ### 4.3 Language Model
 
 | Library  | Role                                                  | Key File                |
 |----------|-------------------------------------------------------|-------------------------|
-| `groq`   | LLM inference via Groq Cloud (`llama-3.3-70b-versatile`) | `backend/llm/llm.py` |
+| `google-genai` | Gemini inference, dynamic model selection, and rotating key clients | `backend/llm/llm.py` |
+| `groq` | Optional Stage 1 query optimizer provider | `backend/llm/groq_provider.py` |
+
+Stage 1 routes query optimization through Groq only when `GROQ_ENABLED=true`
+and a valid `GROQ_API_KEY` is configured. Gemini remains the only draft and
+verification provider. Provider eligibility is restricted to
+`backend/llm/model_registry.json`; gateways and additional providers are not
+enabled until a later evaluated stage.
 
 ### 4.4 Text Processing & Utilities
 
 | Library / Module            | Role                                               | Key File                              |
 |-----------------------------|----------------------------------------------------|---------------------------------------|
 | `backend/utils/fusion.py`   | Context window construction (`fuse_context`)       | `backend/utils/fusion.py`             |
-| `backend/utils/scoring.py`  | Confidence label calculation (`calculate_confidence`) | `backend/utils/scoring.py`         |
+| `backend/agents/confidence_scorer.py` | Confidence label calculation (`calculate_confidence`) | `backend/agents/confidence_scorer.py` |
 | `backend/processing/evidence.py` | Evidence extraction & source deduplication  | `backend/processing/evidence.py`      |
 
 ### 4.5 Page Rendering & Visual Grounding
@@ -96,20 +118,29 @@ citation grounding over raw creativity.**
 
 ## 5. Key Runtime Constants
 
-These values are defined in `backend/config.py` and `backend/retrieval/rag.py`.
+These values are defined in `backend/config.py`.
 They must **not** be changed without updating this document.
 
 ```python
 # backend/config.py
-EMBEDDING_MODEL  = "sentence-transformers/all-MiniLM-L6-v2"
+EMBEDDING_MODEL  = "BAAI/bge-m3"
+EMBEDDING_DIM    = 1024
 RERANK_MODEL     = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 DEFAULT_K        = 30       # FAISS/BM25 candidates per query
-DEFAULT_FINAL_K  = 6        # Final chunks passed to LLM
+# final_k is chosen per request by _final_k_for(): 5 for a simple query,
+# 12 for a complex one, capped by SMART_SUMMARY_FINAL_K in smart_summary mode.
 DEFAULT_RERANK_POOL = 24    # Pool size fed to cross-encoder
 RRF_K            = 60       # Reciprocal Rank Fusion K hyperparameter
 
-# backend/retrieval/rag.py
-RERANK_SCORE_THRESHOLD = -2.0   # Hard filter: drop chunks below this logit
+RERANK_SCORE_THRESHOLD = -3.0   # Hard filter: drop chunks below this logit
+
+# LLM deadlines — read from the environment HERE and imported by call sites.
+# Never re-read these with os.getenv() at a call site: that is how config.py
+# and the live values drifted apart previously.
+LLM_OPTIMIZER_DEADLINE_SECONDS = 8.0
+LLM_DRAFT_DEADLINE_SECONDS     = 60.0
+LLM_VERIFIER_DEADLINE_SECONDS  = 60.0
+LLM_PROVIDER_COOLDOWN_SECONDS  = 60.0
 ```
 
 ---
@@ -123,6 +154,12 @@ RERANK_SCORE_THRESHOLD = -2.0   # Hard filter: drop chunks below this logit
 | `storage/pages/`              | Pre-rendered Harrison page images                 | **NO**           |
 | `backend/`                    | All Python source modules                         | YES              |
 | `evaluation/`                 | Evaluation scripts and metrics                    | YES              |
+| `tests/`                      | Hermetic test suite                               | YES              |
+| `scripts/`                    | Operational tools and `probe_*` diagnostics       | YES              |
+| `docs/archive/`               | Superseded analysis reports — **stale**           | NO               |
+
+Reading an artifact file to *measure* a specific defect is legitimate; letting
+it into general context is not.
 
 ---
 
@@ -130,34 +167,90 @@ RERANK_SCORE_THRESHOLD = -2.0   # Hard filter: drop chunks below this logit
 
 All secrets are stored in `backend/.env` (git-ignored).
 
-| Variable                       | Default  | Purpose                                       |
-|--------------------------------|----------|-----------------------------------------------|
-| `GROQ_API_KEY`                 | —        | Groq Cloud inference key (**required**)       |
-| `SMART_SUMMARY_MAX_TOKENS`     | `2200`   | Max tokens for smart_summary LLM call         |
-| `QA_MAX_TOKENS`                | `900`    | Max tokens for qa LLM call                    |
-| `SMART_SUMMARY_CONTEXT_CHAR_LIMIT` | `18000` | Character cap applied to fused context     |
-| `SMART_SUMMARY_K`              | `48`     | Candidate retrieval K in smart_summary mode   |
-| `SMART_SUMMARY_FINAL_K`        | `12`     | Final-K in smart_summary mode                 |
-| `SMART_SUMMARY_RERANK_POOL`    | `16`     | Rerank pool in smart_summary mode             |
+| Variable | Default | Purpose |
+|---|---|---|
+| `GEMINI_API_KEY`, `GEMINI_API_KEY_1` … `_10` | — | Main plus optional numbered Gemini key pool. Round-robin; a 429/quota key enters a temporary cooldown. |
+| `GEMINI_RATE_LIMIT_COOLDOWN_SECONDS` | `60` | Cooldown applied to a key after a 429/quota response. |
+| `GROQ_ENABLED` | `false` | Enables the Stage 1 Groq optimizer. Requires `GROQ_API_KEY` too. |
+| `GROQ_API_KEY` | — | Groq key. Optimizer stage only — never draft or verification. |
+| `GROQ_OPTIMIZER_MODEL` | `openai/gpt-oss-20b` | **Overrides `model_registry.json`.** Changing the registry alone does nothing while this is set. |
+| `GROQ_REASONING_EFFORT` | `low` | Reasoning budget for reasoning-capable Groq models. |
+| `SMART_SUMMARY_MAX_TOKENS` | `8000` | Generation/verification ceiling for `smart_summary`. Bounded by `max_output_tokens` in the registry (8192); exceeding it is clamped and logged. |
+| `QA_MAX_TOKENS` | `3000` | Same ceiling for `qa`. |
+| `SMART_SUMMARY_CONTEXT_CHAR_LIMIT` | `12000` | Fused-context character budget, applied by `utils/fusion.py` to every mode. |
+| `SMART_SUMMARY_K` | `48` | Candidate retrieval K in `smart_summary` mode. |
+| `SMART_SUMMARY_FINAL_K` | `12` | Cap on the complexity-driven final-K in `smart_summary` mode. |
+| `SMART_SUMMARY_RERANK_POOL` | `16` | Rerank pool in `smart_summary` mode. |
+| `LLM_OPTIMIZER_DEADLINE_SECONDS` | `8` | Optimizer request deadline. |
+| `LLM_DRAFT_DEADLINE_SECONDS` | `60` | Draft request deadline. |
+| `LLM_VERIFIER_DEADLINE_SECONDS` | `60` | Verifier request deadline. |
+| `LLM_PROVIDER_COOLDOWN_SECONDS` | `60` | Non-Gemini deployment cooldown after a rate limit. |
+| `LLM_DRAFT_MAX_ATTEMPTS` | `3` | Draft retry budget. |
+| `LLM_VERIFIER_MAX_ATTEMPTS` | `2` | Verifier retry budget. |
+| `HARRISON_ADMIN_TOKEN` | — | Required by `X-Admin-Token` on `/admin/*`. **Unset closes the admin surface (503), it does not open it.** |
+| `HARRISON_MAX_QUERY_CHARS` | `2000` | Upper bound on `query`. |
+| `HARRISON_RATE_LIMIT_PER_MINUTE` | `30` | Per-client `/ask` limit. `0` disables. |
+| `HARRISON_CORS_ORIGINS` | — | Comma-separated allowed origins. Empty means no cross-origin access. |
+| `HARRISON_LOG_LEVEL` | `INFO` | Level for the `backend` logger. |
+| `HARRISON_RETRIEVAL_LOGS` | `false` | Enables per-query retrieval diagnostics on disk. |
+| `HARRISON_RETRIEVAL_LOG_RETENTION` | `200` | Files kept when retrieval logging is on. |
+| `HARRISON_RETRIEVAL_LOG_QUERIES` | `false` | Whether the raw clinical query is written to those files. Off by default. |
 
 ---
 
 ## 8. Health & Observability
 
-The `/health` endpoint reports three liveness signals:
+The `/health` endpoint reports index, embedding, and Gemini-key readiness:
 
 ```json
 {
   "status": "ok | degraded",
   "faiss_loaded": true,
   "chunks_loaded": true,
-  "groq_key_present": true
+  "faiss_dim": 1024,
+  "embedding_dim": 1024,
+  "embedding_index_dim_match": true,
+  "gemini_key_present": true,
+  "gemini_key_count": 1,
+  "gemini_available_key_count": 1,
+  "llm_providers": []
 }
 ```
 
+`/health` returns **HTTP 503** when degraded and 200 when ok, so an
+orchestrator can act on it. `/metrics` reports pipeline counters and p50/p95
+per stage for the current process.
+
 A `degraded` status means at least one of: FAISS index missing, chunks JSON
-empty, or `GROQ_API_KEY` not set.
+empty, no Gemini key is available, or the active embedding model dimension
+does not match the loaded FAISS index.
 
 ---
 
-*Last updated: 2026-05-30 | Maintainer: HarrisonGPT AI Governance*
+## 9. Smart Summary Runtime Behavior
+
+`smart_summary` uses the mode-specific retrieval values above. The query
+optimizer returns `simple` or `complex`; the API chooses final-K `5` or `12`,
+respectively, then caps it at `SMART_SUMMARY_FINAL_K`. The model output is
+forced to begin with `Topic received — generating Harrison Smart Summary.`.
+Sections are generated only when supported by available content; the runtime
+does not pad omitted sections with placeholder text.
+
+Context fusion has a fixed 12,000-character `SAFE_CHAR_LIMIT` for both modes.
+`SMART_SUMMARY_CONTEXT_CHAR_LIMIT` is therefore informational in the current
+implementation, not a live override of that fusion budget.
+
+---
+
+## 10. Local Runtime
+
+Create or refresh the supported Python 3.12 environment with:
+
+```bash
+./scripts/setup_env.sh
+.venv312/bin/python -m uvicorn backend.api.main:app --reload --host 127.0.0.1 --port 8000
+```
+
+---
+
+*Last updated: 2026-08-21 | Maintainer: HarrisonGPT AI Governance*

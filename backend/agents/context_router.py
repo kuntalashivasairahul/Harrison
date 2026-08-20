@@ -28,7 +28,6 @@ Design principles (CODING_RULES.md §1, §2, §3)
 from __future__ import annotations
 
 import logging
-from typing import List, Dict
 
 log = logging.getLogger(__name__)
 
@@ -51,12 +50,12 @@ OVERLAP_THRESHOLD: float = 0.90
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _get_text(chunk: Dict) -> str:
+def _get_text(chunk: dict) -> str:
     """Return the text of a chunk, normalised to a stripped string."""
     return (chunk.get("text") or "").strip()
 
 
-def _get_page(chunk: Dict) -> int:
+def _get_page(chunk: dict) -> int:
     """
     Return the page number as an integer for sorting.
 
@@ -70,7 +69,7 @@ def _get_page(chunk: Dict) -> int:
         return 0
 
 
-def _is_duplicate(candidate_text: str, accepted_texts: List[str]) -> bool:
+def _is_duplicate(candidate_text: str, accepted_texts: list[str]) -> bool:
     """
     Return True if ``candidate_text`` is substantially contained within
     any already-accepted chunk text, or vice-versa.
@@ -128,7 +127,7 @@ def _is_duplicate(candidate_text: str, accepted_texts: List[str]) -> bool:
 # Public API
 # ---------------------------------------------------------------------------
 
-def route_and_sort_context(chunks: List[Dict]) -> List[Dict]:
+def route_and_sort_context(chunks: list[dict]) -> list[dict]:
     """
     Deduplicate and chronologically sort a list of retrieved chunks.
 
@@ -166,8 +165,8 @@ def route_and_sort_context(chunks: List[Dict]) -> List[Dict]:
 
     try:
         # ── Step 1: Deduplication ──────────────────────────────────────
-        accepted: List[Dict] = []
-        accepted_texts: List[str] = []
+        accepted: list[dict] = []
+        accepted_texts: list[str] = []
 
         for chunk in chunks:
             text = _get_text(chunk)

@@ -52,8 +52,10 @@ paper — except the reader may act on it clinically.
 ```
 
 `verify_answer()` is the last safety gate before the response reaches the
-caller. Its presence in `ask_llm()` is an **architectural invariant**, not a
-feature flag. See §RULE 3.2 for AI-specific enforcement.
+caller. It may only be bypassed when an explicit API request sets
+`disable_verifier=true`; those responses are capped in confidence and are not
+eligible for semantic-cache persistence. See §RULE 3.2 for AI-specific
+enforcement.
 
 ---
 
@@ -68,7 +70,7 @@ introduces bugs that are extremely hard to trace in a pipeline system.**
 |--------------------|------------------------------------------------|---------------------------------------|
 | `api/main.py`      | All backend modules (orchestration only)       | Business logic, retrieval math        |
 | `retrieval/`       | `embeddings.py`, `rerank.py`, `rank_bm25`      | FastAPI, `llm/`, `rendering/`         |
-| `llm/`             | `groq`, `os`, `re`, `pathlib`                  | FastAPI, `retrieval/`, `rendering/`   |
+| `llm/`             | `google.genai`, `os`, `re`, `pathlib`          | FastAPI, `retrieval/`, `rendering/`   |
 | `processing/`      | `utils/fusion.py` only                         | FastAPI, `retrieval/`, `llm/`         |
 | `rendering/`       | `re`, `typing`                                 | FastAPI, `retrieval/`, `llm/`         |
 | `utils/`           | Standard library only                          | Any domain module                     |
@@ -85,12 +87,12 @@ introduces bugs that are extremely hard to trace in a pipeline system.**
 **Do not move RRF scoring, BM25 tokenization, FAISS search, neighbor
 expansion, or the hard filter into `api/main.py` or `utils/`.**
 
-The following constants are defined in `backend/retrieval/rag.py` and are
+The following constants are defined in `backend/config.py` and are
 **immutable**:
 
 ```python
 RRF_K                  = 60     # Reciprocal Rank Fusion K
-RERANK_SCORE_THRESHOLD = -2.0   # Hard filter logit threshold
+RERANK_SCORE_THRESHOLD = -3.0   # Hard filter logit threshold
 ```
 
 Any change to these values requires a documented rationale with empirical
@@ -102,14 +104,17 @@ The following functions are **pure** (no I/O, no side effects) and must
 remain so:
 
 ```python
-calculate_confidence(top_reranker_score, evidence_count, was_verified) → str
+calculate_confidence(chunks, original_answer, verified_answer) → str
 extract_evidence(chunks)  → List[str]
 extract_sources(chunks)   → List[str]
 resolve_page_urls(sources, base_url) → List[Dict[str, str]]
 fuse_context(chunks) → str
 clean_text(text) → str
-top_score(ranked_chunks) → float
 ```
+
+`top_score()` was previously listed here. It was removed once its last
+production caller disappeared from `api/main.py`; nothing but a test stub
+referenced it.
 
 ```
 ❌ FORBIDDEN: Adding logging, DB writes, or HTTP calls inside these functions.
@@ -143,7 +148,7 @@ should be excluded from IDE workspace indexing settings.
 An AI assistant **must NEVER**:
 
 ```
-❌ Remove, comment out, or wrap verify_answer() in a conditional.
+❌ Remove or bypass `verify_answer()` outside the documented `disable_verifier` request option.
 ❌ Remove, comment out, or wrap resolve_page_urls() in a conditional.
 ❌ Remove, comment out, or bypass the RERANK_SCORE_THRESHOLD filter.
 ❌ Remove the confidence, sources, or visual_context fields from QueryResponse.
@@ -165,7 +170,7 @@ An AI assistant **must ALWAYS**:
 
 Before proposing a refactor, an AI assistant must verify:
 
-1. **Does the refactor preserve the 14-stage pipeline order?** (See `ARCHITECTURE.md §1`)
+1. **Does the refactor preserve the documented request flow?** (See `ARCHITECTURE.md §1`)
 2. **Does the refactor preserve the `QueryResponse` schema?** (See `ARCHITECTURE.md §2`)
 3. **Does the refactor maintain module isolation?** (See RULE 2.1 above)
 4. **Does the refactor avoid touching `artifacts/` or `storage/`?**
@@ -178,7 +183,8 @@ written justification before execution.
 ## RULE 4 — Prompting Standards
 
 **The LLM prompts are load-bearing architecture.** Changes to
-`BASE_QA_PROMPT` or `SMART_SUMMARY_PROMPT` in `backend/llm/llm.py` affect
+`MASTER_MEDICAL_SYNTHESIS_PROMPT` or smart-summary formatting logic in
+`backend/llm/llm.py` affects
 every response the system produces.
 
 ### 4.1 Mandatory Prompt Prohibitions
@@ -246,7 +252,7 @@ the `/ask` endpoint with at least one `smart_summary` and one `qa` query:
 - `backend/retrieval/rag.py`
 - `backend/llm/llm.py`
 - `backend/api/main.py`
-- `backend/utils/scoring.py`
+- `backend/agents/confidence_scorer.py`
 - `backend/retrieval/rerank.py`
 
 ### 5.2 Confidence Score Smoke Test
@@ -257,6 +263,25 @@ After any change to `calculate_confidence()` or `rerank.py`, verify that:
 - A query with no FAISS index loaded returns `confidence: "Low"`.
 - A query returning `REFUSAL_STR` has `was_verified=False` in logs.
 
+### 5.2a Hermetic Test Suite
+
+The suite in `tests/` **must** stay hermetic: no network calls, no model
+weights, no FAISS index. That is why it runs in seconds and why CI needs no
+credentials.
+
+```
+❌ FORBIDDEN: A test in tests/ that loads the real index or calls a live model.
+❌ FORBIDDEN: Mutating sys.modules without restoring it — one test that did
+              silently replaced the Google SDK for every test collected after it.
+❌ FORBIDDEN: Naming a program in scripts/ `test_*.py`. Those are interactive
+              diagnostics that load real models; pytest must not collect them.
+              They are named `probe_*.py`.
+✅ REQUIRED:  Use tests/_api_harness.py to import the HTTP layer cheaply.
+```
+
+Integration coverage against the real index and a live model is a separate tier
+that does not exist yet. It is the main outstanding gap in this repository.
+
 ### 5.3 Health Check Gate
 
 The `/health` endpoint must return `"status": "ok"` before any change is
@@ -264,15 +289,47 @@ considered complete:
 
 ```bash
 curl http://127.0.0.1:8000/health
-# Expected: {"status":"ok","faiss_loaded":true,"chunks_loaded":true,"groq_key_present":true}
+# Expected fields include: status=ok, faiss_loaded=true, chunks_loaded=true,
+# embedding_index_dim_match=true, and gemini_key_present=true.
 ```
 
 ### 5.4 Evaluation Harness
 
-For changes to retrieval parameters (`DEFAULT_K`, `DEFAULT_FINAL_K`,
-`RERANK_SCORE_THRESHOLD`, `RRF_K`), run the evaluation harness in
-`evaluation/` before and after to confirm no regression in recall or
-precision metrics.
+For changes to retrieval parameters (`DEFAULT_K`, `DEFAULT_RERANK_POOL`,
+`RERANK_SCORE_THRESHOLD`, `RRF_K`) **or to retrieval behaviour** — the
+tokenizer, the low-value filter, neighbour expansion, fusion ordering — run
+`scripts/evaluate_rag.py` before and after to confirm no regression in recall
+or precision.
+
+This rule previously named only the parameters. Behavioural changes to the same
+pipeline have at least as much effect and were not covered.
+
+---
+
+## RULE 5a — Import-Time Purity
+
+No module under `backend/` may perform expensive or networked work at import
+time.
+
+```
+❌ FORBIDDEN: Loading the FAISS index, chunk registry, BM25 corpus, or an
+              encoder at module scope.
+❌ FORBIDDEN: Any network call at import — model discovery included.
+❌ FORBIDDEN: logging.getLogger("uvicorn.error") in a backend module. Uvicorn
+              leaves root bare at WARNING, so backend.* INFO logs were being
+              discarded; two modules had worked around it locally, which fixed
+              those call sites and hid the cause.
+✅ REQUIRED:  Resolve on first use; force it deliberately in the FastAPI
+              lifespan handler.
+✅ REQUIRED:  Call configure_logging() before any other backend.* import in an
+              entry point, so import-time diagnostics are captured.
+✅ REQUIRED:  Module loggers via logging.getLogger(__name__).
+```
+
+Rationale: import-time work is paid by every test run, every diagnostic script,
+and every tool that merely wants a helper function — and a network call at
+import makes the app's startup depend on a third party before `/health` can
+answer.
 
 ---
 
@@ -285,13 +342,41 @@ The following are the **only** approved runtime dependencies:
 ```
 fastapi
 uvicorn
+pydantic         ← FastAPI's schema layer; pinned because QueryResponse is a frozen contract
 faiss-cpu
 sentence-transformers
+torch            ← required by sentence-transformers; pinned, not newly introduced
+transformers     ← required by sentence-transformers; pinned, not newly introduced
 numpy
-groq
+google-genai
+groq             ← Stage 1 query optimizer only; never draft or verification
 python-dotenv
 rank-bm25
 PyMuPDF          ← for pre-processing page renders (offline only)
+```
+
+**On the pinned transitive dependencies.** `pydantic`, `torch` and
+`transformers` are not new capabilities — they were always installed as
+transitive dependencies of `fastapi` and `sentence-transformers`. They are now
+named and version-pinned in `backend/requirements.txt` because leaving them
+floating meant a fresh install resolved a different `transformers`/`torch` pair
+with no guarantee of reproducing the same embeddings against the committed
+FAISS index. Pinning a dependency you already had is a reproducibility control,
+not a new dependency; adding a genuinely new package still requires §6.2.
+
+`groq` predates this list and serves the optimizer stage only, per the Stage 1
+provider policy in `README.md`. It is recorded here so the list matches
+`backend/requirements.txt`.
+
+### 6.1a Development Dependencies
+
+`backend/requirements-dev.txt` carries test and lint tooling. These are not
+runtime dependencies and must never be imported by anything under `backend/`:
+
+```
+pytest
+httpx            ← required by fastapi.testclient
+ruff
 ```
 
 ### 6.2 Adding a New Dependency
@@ -321,7 +406,7 @@ Adding any new dependency requires:
 │ Keep module isolation  │ Entangle retrieval with routing    │
 │ Keep REFUSAL_STR exact │ Reword the refusal                 │
 │ Keep RRF_K = 60        │ Change fusion math ad-hoc          │
-│ Keep threshold = -2.0  │ Relax the hard filter silently     │
+│ Keep threshold = -3.0  │ Relax the hard filter silently     │
 │ Log side-effects in API│ Add I/O to pure functions          │
 │ Exclude artifacts/     │ Let AI index vectorstore data      │
 └────────────────────────┴────────────────────────────────────┘
@@ -329,4 +414,4 @@ Adding any new dependency requires:
 
 ---
 
-*Last updated: 2026-05-30 | Maintainer: HarrisonGPT AI Governance*
+*Last updated: 2026-08-21 | Maintainer: HarrisonGPT AI Governance*
