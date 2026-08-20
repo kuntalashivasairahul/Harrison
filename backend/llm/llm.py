@@ -252,6 +252,28 @@ _BACKUP_PRIORITY = [
 _DEFAULT_PROD = "gemini-2.5-flash"
 _DEFAULT_BACKUP = "gemini-3.5-flash-lite"
 
+# Second full-strength model for the draft/verifier stages. Deliberately a
+# different generation from _PROD_PRIORITY: when gemini-2.5-flash returned
+# 503 UNAVAILABLE across every key, gemini-3.5-flash answered normally, so a
+# same-family sibling is the cheapest real resilience available.
+_DRAFT_FALLBACK_PRIORITY = [
+    "gemini-3.5-flash",
+    "gemini-3.6-flash",
+    "gemini-2.5-flash",
+]
+_DEFAULT_DRAFT_FALLBACK = "gemini-3.5-flash"
+
+
+
+#: Model names the account offers, cached from the one discovery call.
+_available_cache: list[str] = []
+
+
+def _available_models() -> list[str]:
+    """Model names from the account, discovering them once if needed."""
+    if not _available_cache:
+        resolve_models()
+    return _available_cache
 
 
 def _select_model(priority: list[str], available: list[str], default: str) -> str:
@@ -309,6 +331,8 @@ def get_dynamic_models(api_key: str | None = None) -> tuple[str, str]:
 
         # Strip the "models/" prefix that the API returns
         clean_names = [n.replace("models/", "") for n in available]
+        _available_cache.clear()
+        _available_cache.extend(clean_names)
 
         log.info(
             "get_dynamic_models: %d models support generateContent.",
@@ -362,6 +386,11 @@ def get_dynamic_models(api_key: str | None = None) -> tuple[str, str]:
 # startup via ``resolve_models()``.
 _model_lock = threading.Lock()
 _resolved_models: tuple[str, str] | None = None
+
+
+def draft_fallback_model() -> str:
+    """Second draft/verifier model, resolved lazily like the others."""
+    return _select_model(_DRAFT_FALLBACK_PRIORITY, _available_models(), _DEFAULT_DRAFT_FALLBACK)
 
 
 def resolve_models(force: bool = False) -> tuple[str, str]:
@@ -516,7 +545,7 @@ def _extract_text_safely(response) -> tuple[str, bool]:
 # Created after model discovery and response parsing exist.  The getter keeps
 # the current KeyManager patchable for tests and for the process-wide pool.
 gemini_provider = GeminiProvider(lambda: key_manager, _extract_text_safely)
-llm_router = LLMRouter(gemini_provider, prod_model, backup_model)
+llm_router = LLMRouter(gemini_provider, prod_model, backup_model, draft_fallback_model)
 
 
 # --------------------------------------------------------------------
@@ -562,9 +591,6 @@ def verify_answer(
         verification_ran is False when all retries were exhausted due to
         exceptions — the returned text is the original draft, not verified.
     """
-    if model is None:
-        model = prod_model()
-
     answer = (answer or "").strip()
     context = (context or "").strip()
 
@@ -619,18 +645,19 @@ def verify_answer(
     last_exc: Exception | None = None
     for attempt in range(VERIFIER_MAX_ATTEMPTS):
         try:
-            result = llm_router.generate_named(
-                LLMRequest(
-                    prompt=verify_user,
-                    system_instruction=verify_prompt,
-                    model_alias="gemini-primary",
-                    temperature=0.0,
-                    max_output_tokens=max_tokens,
-                    deadline_seconds=LLM_VERIFIER_DEADLINE_SECONDS,
-                    stage=LLMStage.VERIFIER,
-                ),
-                "gemini-primary",
-                model_override=model,
+            request = LLMRequest(
+                prompt=verify_user,
+                system_instruction=verify_prompt,
+                model_alias="gemini-primary",
+                temperature=0.0,
+                max_output_tokens=max_tokens,
+                deadline_seconds=LLM_VERIFIER_DEADLINE_SECONDS,
+                stage=LLMStage.VERIFIER,
+            )
+            result = (
+                llm_router.generate_named(request, "gemini-primary", model_override=model)
+                if model is not None
+                else llm_router.generate_for_stage(request, LLMStage.VERIFIER)
             )
             verified = result.text
             truncated = result.finish_reason == "MAX_TOKENS"
@@ -803,8 +830,6 @@ def ask_llm(
          "error_fallback"    -- all retries exhausted (API/quota failure)
     """
     import time
-    if model is None:
-        model = prod_model()
 
     if not fused_context or len(fused_context.strip()) < 20:
         return REFUSAL_STR, "", False, "error_fallback"
@@ -837,18 +862,22 @@ def ask_llm(
     for attempt in range(DRAFT_MAX_ATTEMPTS):
         try:
             t_gen_start = time.perf_counter()
-            result = llm_router.generate_named(
-                LLMRequest(
-                    prompt=prompt,
-                    system_instruction="Follow instructions strictly and never use knowledge outside the provided context.",
-                    model_alias="gemini-primary",
-                    temperature=0.2,
-                    max_output_tokens=generation_max_tokens,
-                    deadline_seconds=LLM_DRAFT_DEADLINE_SECONDS,
-                    stage=LLMStage.DRAFT,
-                ),
-                "gemini-primary",
-                model_override=model,
+            request = LLMRequest(
+                prompt=prompt,
+                system_instruction="Follow instructions strictly and never use knowledge outside the provided context.",
+                model_alias="gemini-primary",
+                temperature=0.2,
+                max_output_tokens=generation_max_tokens,
+                deadline_seconds=LLM_DRAFT_DEADLINE_SECONDS,
+                stage=LLMStage.DRAFT,
+            )
+            # An explicit model= pins one deployment (tests, scripts). Otherwise
+            # the stage picks its own deployment and falls back on a provider
+            # outage instead of failing the whole request.
+            result = (
+                llm_router.generate_named(request, "gemini-primary", model_override=model)
+                if model is not None
+                else llm_router.generate_for_stage(request, LLMStage.DRAFT)
             )
             t_gen_end = time.perf_counter()
             if timings is not None:

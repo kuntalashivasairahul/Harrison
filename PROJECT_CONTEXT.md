@@ -52,6 +52,10 @@ citation grounding over raw creativity.**
   stage — Gemini 2.5 spends `max_output_tokens` on an internal reasoning pass,
   which used to truncate the verifier and force a `draft_fallback` on every
   smart summary.
+- **Draft resilience**: the draft and verifier stages fail over across
+  deployments in priority order (`gemini-primary` -> `gemini-draft-fallback`,
+  a different Gemini model). Eligible failures: rate limit, timeout,
+  unavailable, and model-not-found.
 - **Observability**: `backend/logging_config.py` makes `backend.*` logs visible
   under uvicorn; every request carries an `X-Request-ID`; `/metrics` exposes
   counters and p50/p95 per stage.

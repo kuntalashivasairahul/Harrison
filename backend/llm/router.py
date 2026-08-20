@@ -16,6 +16,15 @@ from backend.llm.contracts import LLMError, LLMErrorCategory, LLMRequest, LLMRes
 from backend.llm.groq_provider import GroqProvider
 
 log = logging.getLogger(__name__)
+
+#: Failures worth trying the next deployment for. A bad request or a bad key
+#: will fail identically everywhere, so those stop the loop immediately.
+FALLBACK_ELIGIBLE = frozenset({
+    LLMErrorCategory.RATE_LIMITED,
+    LLMErrorCategory.TIMEOUT,
+    LLMErrorCategory.UNAVAILABLE,
+    LLMErrorCategory.NOT_FOUND,
+})
 _REGISTRY_PATH = Path(__file__).with_name("model_registry.json")
 
 
@@ -54,11 +63,13 @@ def load_registry(path: Path = _REGISTRY_PATH) -> dict[str, Deployment]:
 class LLMRouter:
     """Routes only approved deployments and records temporary cooldowns."""
 
-    def __init__(self, gemini_provider, prod_model: str, backup_model: str) -> None:
+    def __init__(self, gemini_provider, prod_model: str, backup_model: str,
+                 draft_fallback_model: str | None = None) -> None:
         self._gemini_provider = gemini_provider
         self._groq_provider = GroqProvider()
         self._prod_model = prod_model
         self._backup_model = backup_model
+        self._draft_fallback_model = draft_fallback_model or backup_model
         self._deployments = load_registry()
         self._lock = threading.Lock()
         self._cooldowns: dict[str, float] = {}
@@ -99,6 +110,8 @@ class LLMRouter:
             return self._value(self._prod_model)
         if deployment.model == "dynamic-backup":
             return self._value(self._backup_model)
+        if deployment.model == "dynamic-draft-fallback":
+            return self._value(self._draft_fallback_model)
         if deployment.alias == "groq-optimizer":
             return os.getenv("GROQ_OPTIMIZER_MODEL", deployment.model).strip() or deployment.model
         return deployment.model
@@ -151,7 +164,7 @@ class LLMRouter:
             self._cooldown(deployment, error)
             with self._lock:
                 self._last_errors[deployment.alias] = error.category.value
-            log.warning("llm_route: stage=%s provider=%s deployment=%s error=%s fallback_eligible=%s", bounded.stage.value, deployment.provider, deployment.alias, error.category.value, error.category in {LLMErrorCategory.RATE_LIMITED, LLMErrorCategory.TIMEOUT, LLMErrorCategory.UNAVAILABLE})
+            log.warning("llm_route: stage=%s provider=%s deployment=%s error=%s fallback_eligible=%s", bounded.stage.value, deployment.provider, deployment.alias, error.category.value, error.category in FALLBACK_ELIGIBLE)
             raise
 
     def generate_named(self, request: LLMRequest, alias: str, model_override: str | None = None) -> LLMResult:
@@ -160,16 +173,35 @@ class LLMRouter:
             raise LLMError(LLMErrorCategory.UNAVAILABLE, f"Deployment {alias!r} is not eligible.")
         return self.generate(request, deployment, model_override=model_override)
 
-    def optimize(self, request: LLMRequest) -> LLMResult:
+    def generate_for_stage(self, request: LLMRequest, stage: LLMStage) -> LLMResult:
+        """Try every eligible deployment for a stage, in priority order.
+
+        The draft and verifier stages previously called generate_named() against
+        a single deployment, so a provider-side outage on that one model failed
+        the whole request even though a second Gemini deployment was configured
+        and healthy. This is the failover the optimizer stage has always had.
+        """
         last_error: LLMError | None = None
-        for deployment in self.deployments_for(LLMStage.OPTIMIZER):
+        deployments = self.deployments_for(stage)
+        for index, deployment in enumerate(deployments):
             try:
+                if index:
+                    log.warning(
+                        "llm_route: stage=%s falling back to deployment=%s after %s",
+                        stage.value, deployment.alias,
+                        last_error.category.value if last_error else "unknown",
+                    )
                 return self.generate(request, deployment)
             except LLMError as error:
                 last_error = error
-                if error.category not in {LLMErrorCategory.RATE_LIMITED, LLMErrorCategory.TIMEOUT, LLMErrorCategory.UNAVAILABLE}:
+                if error.category not in FALLBACK_ELIGIBLE:
                     break
-        raise last_error or LLMError(LLMErrorCategory.UNAVAILABLE, "No optimizer deployment is eligible.")
+        raise last_error or LLMError(
+            LLMErrorCategory.UNAVAILABLE, f"No {stage.value} deployment is eligible."
+        )
+
+    def optimize(self, request: LLMRequest) -> LLMResult:
+        return self.generate_for_stage(request, LLMStage.OPTIMIZER)
 
     def status(self) -> list[dict[str, object]]:
         now = time.monotonic()

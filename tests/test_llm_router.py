@@ -19,8 +19,16 @@ def _request() -> LLMRequest:
 class TestRegistry(unittest.TestCase):
     def test_default_registry_has_only_approved_stage_one_deployments(self) -> None:
         registry = load_registry()
-        self.assertEqual(set(registry), {"gemini-primary", "gemini-optimizer-fallback", "groq-optimizer"})
+        self.assertEqual(
+            set(registry),
+            {"gemini-primary", "gemini-draft-fallback", "gemini-optimizer-fallback", "groq-optimizer"},
+        )
         self.assertEqual(registry["gemini-primary"].stages, (LLMStage.DRAFT, LLMStage.VERIFIER))
+        # The draft stage must have somewhere to fall back to.
+        self.assertEqual(registry["gemini-draft-fallback"].stages, (LLMStage.DRAFT, LLMStage.VERIFIER))
+        self.assertGreater(
+            registry["gemini-draft-fallback"].priority, registry["gemini-primary"].priority
+        )
 
     def test_invalid_registry_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

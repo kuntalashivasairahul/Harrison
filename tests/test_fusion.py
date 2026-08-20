@@ -150,5 +150,39 @@ class TestFuseChunksRelevanceBudget(unittest.TestCase):
         self.assertNotIn("[p:2|c:2]", fused)
 
 
+class TestSelectedChunkIds(unittest.TestCase):
+    def test_reports_exactly_what_fuse_chunks_emits(self):
+        chunks = [
+            {"text": "alpha beta gamma delta epsilon zeta", "page": 1, "chunk_id": 11, "score": 5.0},
+            {"text": "eta theta iota kappa lambda mu", "page": 2, "chunk_id": 22, "score": 4.0},
+            {"text": "nu xi omicron pi rho sigma", "page": 3, "chunk_id": 33, "score": 3.0},
+        ]
+        one = len(fusion.fuse_chunks([chunks[0]]))
+        with patch.object(fusion, "SAFE_CHAR_LIMIT", one * 2 + 1):
+            fused = fusion.fuse_chunks(chunks)
+            ids = fusion.selected_chunk_ids(chunks)
+
+        for cid in ids:
+            self.assertIn(f"c:{cid}]", fused)
+        self.assertEqual(len(ids), fused.count("\n") + 1)
+
+    def test_selects_by_score_not_position(self):
+        chunks = [
+            {"text": "low scoring passage with enough words here", "page": 1, "chunk_id": 1, "score": -5.0},
+            {"text": "high scoring passage with enough words here", "page": 2, "chunk_id": 2, "score": 9.0},
+        ]
+        one = len(fusion.fuse_chunks([chunks[1]]))
+        with patch.object(fusion, "SAFE_CHAR_LIMIT", one):
+            self.assertEqual(fusion.selected_chunk_ids(chunks), {2})
+
+    def test_skips_chunks_fusion_would_reject(self):
+        chunks = [
+            {"text": "too short", "page": 1, "chunk_id": 1},
+            {"text": "valid clinical context with enough words", "page": None, "chunk_id": 2},
+            {"text": "valid clinical context with enough words", "page": 3, "chunk_id": 3},
+        ]
+        self.assertEqual(fusion.selected_chunk_ids(chunks), {3})
+
+
 if __name__ == "__main__":
     unittest.main()

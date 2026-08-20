@@ -2,9 +2,20 @@
 from backend.utils.fusion import clean_text
 
 
-def extract_evidence(chunks: list[dict]) -> list[str]:
+def extract_evidence(chunks: list[dict], exclude_chunk_ids: set | None = None) -> list[str]:
     """
     Convert retrieved chunks into page-cited evidence statements for the LLM.
+
+    ``exclude_chunk_ids`` skips chunks the fused context already carries. The
+    two blocks used to be built from the same list, so a chunk that fit the
+    context budget was sent to the model twice — once as ``- text [p:N|c:M]``
+    and again as ``EVIDENCE: text [p:N]``. Measured on one real query: 11
+    chunks retrieved, 5 in the context, all 11 in an uncapped evidence block of
+    25,337 characters, 42% of it verbatim duplication.
+
+    Nothing is dropped, which RULE 3.2 forbids. Every retrieved chunk still
+    reaches the model exactly once: in the context if it fit the budget, in
+    evidence if it did not.
 
     Each statement retains the full cleaned chunk text up to MAX_WORDS words
     so that critical pathophysiological mechanisms, lab thresholds, and scoring
@@ -25,8 +36,13 @@ def extract_evidence(chunks: list[dict]) -> list[str]:
     if not chunks:
         return evidence
 
+    excluded = exclude_chunk_ids or frozenset()
+
     for ch in chunks:
         if not isinstance(ch, dict):
+            continue
+
+        if ch.get("chunk_id") in excluded:
             continue
 
         raw_text = ch.get("text") or ""

@@ -43,6 +43,21 @@
       "timeout_seconds": 5,
       "privacy": "configured_external_provider",
       "priority": 10
+    },
+    {
+      "alias": "gemini-draft-fallback",
+      "provider": "gemini",
+      "model": "dynamic-draft-fallback",
+      "enabled": true,
+      "stages": [
+        "draft",
+        "verifier"
+      ],
+      "max_input_tokens": 12000,
+      "max_output_tokens": 8192,
+      "timeout_seconds": 60,
+      "privacy": "configured_external_provider",
+      "priority": 20
     }
   ]
 }

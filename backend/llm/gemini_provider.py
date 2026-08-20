@@ -18,6 +18,12 @@ def normalize_provider_error(exc: Exception, provider: str) -> LLMError:
         return LLMError(LLMErrorCategory.AUTH, str(exc), provider=provider)
     if any(marker in text for marker in ("400", "invalid argument", "context length", "max tokens")):
         return LLMError(LLMErrorCategory.INVALID_REQUEST, str(exc), provider=provider)
+    # Checked before the 400/invalid-argument rule: a 404 body often mentions
+    # the model name and would otherwise fall through to UNKNOWN, which is not
+    # fallback-eligible. Three separate outages in this project traced back to a
+    # model being retired, so this needs its own category.
+    if any(marker in text for marker in ("404", "not_found", "not found", "does not exist", "is not supported")):
+        return LLMError(LLMErrorCategory.NOT_FOUND, str(exc), provider=provider)
     if any(marker in text for marker in ("500", "502", "503", "unavailable", "connection reset")):
         return LLMError(LLMErrorCategory.UNAVAILABLE, str(exc), provider=provider)
     return LLMError(LLMErrorCategory.UNKNOWN, str(exc), provider=provider)

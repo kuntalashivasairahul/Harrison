@@ -53,6 +53,66 @@ def _chunk_score(chunk: dict) -> float:
         return float("-inf")
 
 
+def _select_within_budget(chunks) -> list[dict]:
+    """Chunks that fit SAFE_CHAR_LIMIT, chosen by relevance, emitted in order.
+
+    Shared by ``fuse_chunks()`` and ``selected_chunk_ids()`` so the two can
+    never disagree about which chunks made the cut.
+    """
+    prepared: list[dict] = []
+
+    for position, ch in enumerate(chunks):
+        text = ch.get("text") if isinstance(ch, dict) else None
+        if not text:
+            continue
+
+        txt = clean_text(text)
+        if len(txt.split()) < 5:
+            continue
+
+        page     = ch.get("page")
+        chunk_id = ch.get("chunk_id")
+        if page is None or chunk_id is None:
+            continue
+
+        prepared.append(
+            {
+                "position": position,
+                "chunk_id": chunk_id,
+                "line": f"- {txt} [p:{page}|c:{chunk_id}]",
+                "score": _chunk_score(ch),
+            }
+        )
+
+    # Pass 1 — select by relevance.  Ties (and unscored chunks) fall back to
+    # supplied order, so this is a no-op for callers that pass no scores.
+    by_relevance = sorted(prepared, key=lambda item: (-item["score"], item["position"]))
+
+    selected: list[dict] = []
+    running_chars: int = 0
+    for item in by_relevance:
+        projected_chars = running_chars + len(item["line"]) + (1 if selected else 0)
+        if projected_chars > SAFE_CHAR_LIMIT:
+            # Keep going rather than break: a shorter, lower-scored chunk may
+            # still fit in the space this one could not.
+            continue
+        selected.append(item)
+        running_chars = projected_chars
+
+    # Pass 2 — emit in supplied (page) order.
+    selected.sort(key=lambda item: item["position"])
+    return selected
+
+
+def selected_chunk_ids(chunks) -> set:
+    """chunk_ids that fuse_chunks() will include for this input.
+
+    Lets the evidence builder skip whatever the context already carries, so no
+    chunk is sent to the model twice.
+    """
+    return {item["chunk_id"] for item in _select_within_budget(chunks)}
+
+
 def fuse_chunks(chunks) -> str:
     """
     Fuse retrieved chunks into a single context string that is guaranteed to
@@ -76,49 +136,7 @@ def fuse_chunks(chunks) -> str:
     with relevance: the top-ranked chunk was silently discarded whenever it
     came from late in the textbook.
     """
-    prepared: list[dict] = []
-
-    for position, ch in enumerate(chunks):
-        text = ch.get("text") if isinstance(ch, dict) else None
-        if not text:
-            continue
-
-        txt = clean_text(text)
-        if len(txt.split()) < 5:
-            continue
-
-        page     = ch.get("page")
-        chunk_id = ch.get("chunk_id")
-        if page is None or chunk_id is None:
-            continue
-
-        prepared.append(
-            {
-                "position": position,
-                "line": f"- {txt} [p:{page}|c:{chunk_id}]",
-                "score": _chunk_score(ch),
-            }
-        )
-
-    # Pass 1 — select by relevance.  Ties (and unscored chunks) fall back to
-    # supplied order, so this is a no-op for callers that pass no scores.
-    by_relevance = sorted(prepared, key=lambda item: (-item["score"], item["position"]))
-
-    selected: list[dict] = []
-    running_chars: int = 0
-    for item in by_relevance:
-        projected_chars = running_chars + len(item["line"]) + (1 if selected else 0)
-        if projected_chars > SAFE_CHAR_LIMIT:
-            # Keep going rather than break: a shorter, lower-scored chunk may
-            # still fit in the space this one could not.
-            continue
-        selected.append(item)
-        running_chars = projected_chars
-
-    # Pass 2 — emit in supplied (page) order.
-    selected.sort(key=lambda item: item["position"])
-
-    return "\n".join(item["line"] for item in selected)
+    return "\n".join(item["line"] for item in _select_within_budget(chunks))
 
 
 # ✅ ALIAS TO MATCH main.py

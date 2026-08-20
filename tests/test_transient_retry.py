@@ -84,7 +84,7 @@ class TestAskLlmUsesTheWholeBudget(unittest.TestCase):
     def test_a_503_consumes_every_attempt_before_giving_up(self):
         """The live symptom: one attempt, then the generic error fallback."""
         router = MagicMock()
-        router.generate_named.side_effect = LLMError(
+        router.generate_for_stage.side_effect = LLMError(
             LLMErrorCategory.UNAVAILABLE, "503 UNAVAILABLE high demand"
         )
         with patch.object(llm_mod, "llm_router", router), \
@@ -95,13 +95,13 @@ class TestAskLlmUsesTheWholeBudget(unittest.TestCase):
                 fused_context="A" * 200, question="test"
             )
 
-        self.assertEqual(router.generate_named.call_count, 3)
+        self.assertEqual(router.generate_for_stage.call_count, 3)
         self.assertEqual(path, "error_fallback")
 
     def test_a_transient_failure_that_recovers_returns_a_real_answer(self):
         result = MagicMock(text="recovered answer", finish_reason="STOP")
         router = MagicMock()
-        router.generate_named.side_effect = [
+        router.generate_for_stage.side_effect = [
             LLMError(LLMErrorCategory.UNAVAILABLE, "503"),
             result,
             result,

@@ -17,6 +17,10 @@ class LLMErrorCategory(str, Enum):
     RATE_LIMITED = "rate_limited"
     TIMEOUT = "timeout"
     UNAVAILABLE = "unavailable"
+    # A model the provider no longer serves for this key. Permanent for that
+    # deployment, so retrying it is pointless — but a different deployment may
+    # well work, which is why it is fallback-eligible but not retry-eligible.
+    NOT_FOUND = "not_found"
     INVALID_REQUEST = "invalid_request"
     AUTH = "auth"
     UNKNOWN = "unknown"

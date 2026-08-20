@@ -107,5 +107,42 @@ class TestExtractEvidence(unittest.TestCase):
         self.assertIn("[p:2]", result[1])
 
 
+class TestEvidenceDeduplication(unittest.TestCase):
+    """The context and evidence blocks were built from the same list, so every
+    chunk that fit the context budget was sent to the model twice."""
+
+    def _chunks(self):
+        return [
+            {"chunk_id": i, "page": i, "text": f"Clinical passage number {i} with enough words to survive."}
+            for i in range(1, 6)
+        ]
+
+    def test_excluded_chunks_are_omitted(self):
+        ev = extract_evidence(self._chunks(), exclude_chunk_ids={1, 2, 3})
+        self.assertEqual(len(ev), 2)
+        for dropped in ("number 1 ", "number 2 ", "number 3 "):
+            self.assertFalse(any(dropped in e for e in ev))
+
+    def test_nothing_is_lost_between_the_two_blocks(self):
+        """RULE 3.2 forbids dropping evidence to save tokens. Every chunk must
+        still reach the model exactly once."""
+        from backend.utils.fusion import selected_chunk_ids
+
+        chunks = self._chunks()
+        in_context = selected_chunk_ids(chunks)
+        in_evidence = extract_evidence(chunks, exclude_chunk_ids=in_context)
+
+        self.assertEqual(len(in_context) + len(in_evidence), len(chunks))
+        self.assertEqual(in_context & {int(e.split("[p:")[1].rstrip("]")) for e in in_evidence}, set())
+
+    def test_default_behaviour_is_unchanged(self):
+        chunks = self._chunks()
+        self.assertEqual(len(extract_evidence(chunks)), len(chunks))
+        self.assertEqual(len(extract_evidence(chunks, exclude_chunk_ids=None)), len(chunks))
+
+    def test_empty_exclusion_keeps_everything(self):
+        self.assertEqual(len(extract_evidence(self._chunks(), exclude_chunk_ids=set())), 5)
+
+
 if __name__ == "__main__":
     unittest.main()

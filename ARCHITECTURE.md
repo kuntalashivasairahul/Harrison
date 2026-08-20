@@ -25,7 +25,10 @@ The request lifecycle for `/ask` is:
    silently dropping the top-ranked chunk whenever it came from late in the
    textbook.
 5. Evidence and source labels are extracted from the retrieved chunks.
-6. `ask_llm()` uses the stage-aware router with the approved `gemini-primary` deployment. `KeyManager` uses `GEMINI_API_KEY` plus `GEMINI_API_KEY_1` through `_10` as distinct round-robin projects and temporarily cools down individual projects after quota responses.
+6. `ask_llm()` uses the stage-aware router, which tries every deployment
+   registered for the stage in priority order — `gemini-primary`, then
+   `gemini-draft-fallback` on a different Gemini model. A provider-side outage
+   on one model no longer fails the request. `KeyManager` uses `GEMINI_API_KEY` plus `GEMINI_API_KEY_1` through `_10` as distinct round-robin projects and temporarily cools down individual projects after quota responses.
 7. Unless `disable_verifier` is requested, `verify_answer()` performs a grounded Gemini rewrite at temperature `0.0`. A complete verified response is the only response eligible for semantic-cache persistence.
 8. `backend/agents/confidence_scorer.py` scores the final response from average cross-encoder relevance and draft-to-verified length divergence; return-path and truncation caps are then applied by the API.
 9. Source labels are resolved into page-image URLs and returned with timing data in `QueryResponse`.

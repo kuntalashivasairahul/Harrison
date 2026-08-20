@@ -47,7 +47,7 @@ from backend.retrieval.embeddings import embed_text, embedding_dimension
 from backend.retrieval.embeddings import warmup as embeddings_warmup
 from backend.retrieval.rag import retrieve
 from backend.retrieval.rerank import warmup_reranker
-from backend.utils.fusion import fuse_context
+from backend.utils.fusion import fuse_context, selected_chunk_ids
 
 MAX_QUERY_CHARS = int(os.getenv("HARRISON_MAX_QUERY_CHARS", "2000"))
 RATE_LIMIT_PER_MINUTE = int(os.getenv("HARRISON_RATE_LIMIT_PER_MINUTE", "30"))
@@ -460,8 +460,14 @@ def ask_question(req: QueryRequest, request: Request) -> QueryResponse:
     # 3️⃣ Fuse context
     fused_context = fuse_context(retrieved_chunks)
 
-    # 4️⃣ Extract structured evidence statements
-    evidence = extract_evidence(retrieved_chunks)
+    # 4️⃣ Extract structured evidence for the chunks the context could not carry.
+    #    Building both blocks from the same list sent every context chunk to the
+    #    model twice; excluding them removes the duplication without losing a
+    #    single chunk.
+    evidence = extract_evidence(
+        retrieved_chunks,
+        exclude_chunk_ids=selected_chunk_ids(retrieved_chunks),
+    )
 
     # 5️⃣ Ask LLM
     #    question= uses raw_query so the answer is phrased naturally for

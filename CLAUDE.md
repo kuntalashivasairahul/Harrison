@@ -104,5 +104,10 @@ and do not let them into general context.
 - **Deadlines and cooldowns live in `backend/config.py`** and are imported by
   call sites. Do not reintroduce `os.getenv("LLM_..._DEADLINE_SECONDS")` at a
   call site — config and the live values silently drifted apart that way before.
+- The evidence block is built only from chunks the fused context could **not**
+  carry. Building both from the same list sends every context chunk twice —
+  that was 30% of the input budget.
+- Draft/verifier failover exists (`router.generate_for_stage`). Passing an
+  explicit `model=` to `ask_llm()` pins one deployment and bypasses it.
 - Anything in `scripts/` is documented in `scripts/README.md`. Check there
   before assuming a script is dead.
