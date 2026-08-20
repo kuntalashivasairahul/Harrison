@@ -35,6 +35,13 @@ For a detailed walkthrough, step-by-step trace, and sequence diagram of how cont
 ### 1. Prerequisites
 * Python 3.12
 * Virtual Environment manager (venv)
+* [git-lfs](https://git-lfs.com) — the FAISS index and chunk registry are
+  tracked in LFS. Install it **before** cloning:
+  ```bash
+  brew install git-lfs && git lfs install   # macOS
+  ```
+  Without it, `artifacts/vectorstore/*` checks out as small text pointer files
+  and the API starts in a degraded state.
 
 ### 2. Environment Setup
 Clone the repository. The checked-in production vectorstore under
@@ -46,8 +53,12 @@ On macOS or Linux, initialize the Python virtual environment:
 ```bash
 ./scripts/setup_env.sh
 # Or, after setup:
-.venv312/bin/pip install -r backend/requirements.txt
+.venv312/bin/pip install -r backend/requirements.txt -r backend/requirements-dev.txt
 ```
+
+`.venv312` (Python 3.12) is the **only** supported runtime — it runs the server,
+the test suite, and the diagnostic scripts. Dependencies are pinned in
+`backend/requirements.txt`; test and lint tools in `backend/requirements-dev.txt`.
 
 On Windows PowerShell:
 ```powershell
@@ -78,7 +89,7 @@ GEMINI_RATE_LIMIT_COOLDOWN_SECONDS=60
 # Stage 1 Groq optimizer. Disabled unless both variables are set.
 GROQ_ENABLED=false
 GROQ_API_KEY=""
-GROQ_OPTIMIZER_MODEL=llama-3.1-8b-instant
+GROQ_OPTIMIZER_MODEL=openai/gpt-oss-20b
 LLM_OPTIMIZER_DEADLINE_SECONDS=8
 LLM_DRAFT_DEADLINE_SECONDS=30
 LLM_VERIFIER_DEADLINE_SECONDS=30
@@ -102,7 +113,11 @@ The server will start at `http://127.0.0.1:8000`.
 ### Portable Assets
 
 The production retrieval index is committed so a normal `git clone` can answer
-questions without rebuilding embeddings. `backend/.env`, semantic-cache data,
+questions without rebuilding embeddings. It is tracked in **git-lfs**
+(see `.gitattributes`), so rebuilding the index no longer adds its full size to
+git history on every commit. Note that the copies committed before LFS was
+adopted remain as ordinary blobs in history — this stops future growth, it does
+not shrink the past. `backend/.env`, semantic-cache data,
 staging indexes, backups, rendered page images, and the original PDF are
 intentionally excluded. Copy your own keys into `backend/.env` from
 `.env.example` on each machine. The API still runs without the page-image
@@ -165,6 +180,26 @@ index checksums and deliberate rebuild command.
 
 ## 🧪 Evaluation
 
+### Test suite
+
+```bash
+.venv312/bin/python -m pytest
+```
+
+The suite is hermetic — no network, no model weights, no FAISS index — and runs
+in a few seconds. Collection is scoped to `tests/` by `pyproject.toml`; the
+programs under `scripts/` are named `probe_*.py` because they are interactive
+diagnostics, not tests.
+
+### Retrieval diagnostics
+
+```bash
+.venv312/bin/python scripts/probe_retrieval.py --query "Ranson criteria pancreatitis"
+.venv312/bin/python scripts/probe_retrieval.py --staging      # staging vectorstore
+```
+
+### Evaluation harness
+
 The `evaluation/` directory contains tools and test configurations (e.g. `test_queries.json`) to validate the RAG pipeline recall, accuracy, and latency metrics. Use the project Python runtime for custom scripts:
 ```bash
 .venv312/bin/python -m evaluation.run_eval
@@ -181,10 +216,16 @@ verification token ceiling for this mode. The first response line is enforced
 as `Topic received — generating Harrison Smart Summary.`; headings are
 generated from available evidence rather than padded with empty sections.
 
-`SMART_SUMMARY_CONTEXT_CHAR_LIMIT` is loaded with a default of `12000`, but
-the current fusion implementation applies its own fixed `SAFE_CHAR_LIMIT` of
-`12000` characters to every mode. Changing the environment variable alone
-does not currently change the fused-context budget.
+`SMART_SUMMARY_CONTEXT_CHAR_LIMIT` (default `12000`) sets the fused-context
+character budget applied by `backend/utils/fusion.py` to every mode. Chunks are
+selected against this budget in descending cross-encoder score and then emitted
+in page order, so raising or lowering it changes how much context survives, not
+which chunks are preferred.
+
+`SMART_SUMMARY_MAX_TOKENS` is additionally bounded by `max_output_tokens` for
+the `gemini-primary` deployment in `backend/llm/model_registry.json` (currently
+`3000`). Requesting more than the registry allows is clamped, and the clamp is
+logged at WARNING; lift the registry value to raise the real ceiling.
 
 ### Stage 1 Provider Policy
 

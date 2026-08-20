@@ -13,15 +13,48 @@
 
 The request lifecycle for `/ask` is:
 
-1. `optimize_query()` calls the approved router: Groq first when explicitly enabled, Gemini Flash-Lite second, then a deterministic local fallback. It classifies the query, rejects non-medical requests, expands the search query, and labels complexity.
+1. `optimize_query()` calls the approved router: Groq first when explicitly enabled, Gemini Flash-Lite second, then a deterministic local fallback. It classifies the query, rejects non-medical requests, expands the search query, and labels complexity. This is the **only** query-expansion stage; the rule-based `expand_query()` that used to fan retrieval out over four templated variants has been removed.
 2. The API embeds the search query with `BAAI/bge-m3` and checks the semantic cache against exact runtime metadata.
-3. A cache miss runs hybrid FAISS/BM25 retrieval, RRF fusion (`RRF_K=60`), neighbor expansion, cross-encoder reranking, and the `RERANK_SCORE_THRESHOLD=-3.0` hard filter.
-4. `route_and_sort_context()` deduplicates and page-orders chunks; `fuse_context()` constructs the prompt context within its fixed 12,000-character limit.
+3. A cache miss runs a single hybrid FAISS/BM25 pass, RRF fusion (`RRF_K=60`), neighbor expansion (restricted to chunks within one page of their parent), cross-encoder reranking, and the `RERANK_SCORE_THRESHOLD=-3.0` hard filter.
+4. `route_and_sort_context()` deduplicates and page-orders chunks; `fuse_context()` constructs the prompt context within `SMART_SUMMARY_CONTEXT_CHAR_LIMIT` (default 12,000 characters).
+
+   **Ordering contract:** fusion selects which chunks survive the budget in
+   descending cross-encoder score, then emits the survivors in page order.
+   Selecting in page order instead — as it previously did — makes the budget
+   discard the highest-numbered pages rather than the least relevant chunks,
+   silently dropping the top-ranked chunk whenever it came from late in the
+   textbook.
 5. Evidence and source labels are extracted from the retrieved chunks.
 6. `ask_llm()` uses the stage-aware router with the approved `gemini-primary` deployment. `KeyManager` uses `GEMINI_API_KEY` plus `GEMINI_API_KEY_1` through `_10` as distinct round-robin projects and temporarily cools down individual projects after quota responses.
 7. Unless `disable_verifier` is requested, `verify_answer()` performs a grounded Gemini rewrite at temperature `0.0`. A complete verified response is the only response eligible for semantic-cache persistence.
 8. `backend/agents/confidence_scorer.py` scores the final response from average cross-encoder relevance and draft-to-verified length divergence; return-path and truncation caps are then applied by the API.
 9. Source labels are resolved into page-image URLs and returned with timing data in `QueryResponse`.
+
+---
+
+## 1a. Import-Time Purity
+
+No module under `backend/` may do expensive or networked work at import time.
+Specifically:
+
+- `backend/retrieval/rag.py` loads `chunks.json`, the FAISS index, and the BM25
+  index **on first access**, via PEP 562 `__getattr__`. `rag.warmup()` forces it.
+- `backend/retrieval/embeddings.py` constructs the BGE-M3 encoder on first call
+  to `get_model()`. `warmup()` forces it.
+- `backend/llm/llm.py` resolves `PROD_MODEL` / `BACKUP_MODEL` through
+  `resolve_models()` on first use, not at import. Reading the module attributes
+  still works and triggers resolution lazily.
+
+All of it is forced deliberately in the FastAPI `lifespan` handler, so startup
+pays the cost once and the first request does not. This is what keeps the test
+suite hermetic and fast — importing `backend.api.main` costs ~0.2s with the
+heavy modules stubbed, and the full suite runs in ~3s with no network access.
+
+`backend/logging_config.py` must be imported and `configure_logging()` called
+**before** any other `backend.*` import in an entry point, so that diagnostics
+emitted during module import are captured. Modules obtain loggers with
+`logging.getLogger(__name__)`; reaching for `"uvicorn.error"` re-hides the
+problem that module exists to solve.
 
 ---
 
@@ -63,8 +96,8 @@ Harrison/                              ← Project root
 │   │
 │   ├── retrieval/
 │   │   ├── rag.py                     ← Core retrieval pipeline:
-│   │   │                                expand_query(), _hybrid_candidates(),
-│   │   │                                _pretrim_for_rerank(), retrieve()
+│   │   │                                _hybrid_candidates(), _pretrim_for_rerank(),
+│   │   │                                retrieve(); lazy vectorstore via warmup()
 │   │   │                                Uses RERANK_SCORE_THRESHOLD from config.py
 │   │   ├── rerank.py                  ← CrossEncoder wrapper: rerank(), top_score()
 │   │   └── embeddings.py              ← embed_text() — FAISS query embedding
@@ -92,14 +125,16 @@ Harrison/                              ← Project root
 │   │   └── fusion.py                  ← fuse_context(), clean_text()
 │   │
 │   ├── config.py                      ← Global path & model constants
-│   ├── requirements.txt               ← Python dependencies
+│   ├── logging_config.py              ← configure_logging(); call before backend imports
+│   ├── requirements.txt               ← Pinned runtime dependencies
+│   ├── requirements-dev.txt           ← Test/lint dependencies
 │   └── .env                           ← Secrets (git-ignored)
 │
 ├── artifacts/                         ← Runtime data — DO NOT SCAN
 │   ├── vectorstore/
 │   │   ├── index.faiss                ← FAISS index (binary)
 │   │   └── chunks.json                ← Chunk metadata (text, page, chunk_id)
-│   └── retrieval_logs/                ← Per-query JSON diagnostics (auto-written)
+│   └── retrieval_logs/                ← Per-query diagnostics (opt-in, capped, query withheld)
 │
 ├── storage/                           ← Static media — DO NOT SCAN
 │   └── pages/
@@ -122,7 +157,7 @@ api/main.py
     ├── retrieval/rag.py          (retrieve)
     ├── utils/fusion.py           (fuse_context)
     ├── processing/evidence.py    (extract_evidence, extract_sources)
-    ├── llm/llm.py                (ask_llm, REFUSAL_STR)
+    ├── llm/llm.py                (ask_llm, resolve_models)
     ├── retrieval/rerank.py       (top_score)
     ├── agents/confidence_scorer.py (calculate_confidence)
     └── rendering/page_resolver.py (resolve_page_urls)
@@ -166,9 +201,10 @@ appear in only one index receive only one term.
 
 | Condition                                                      | Label      |
 |----------------------------------------------------------------|------------|
-| No retrieved chunks, unusable scores, or average score `< -2.0` | **Low**  |
+| No retrieved chunks, or half or more of them carry no usable score | **Low**  |
+| Average score `< -2.0`                                          | **Low**  |
 | Draft-to-verified length divergence `> 0.40`                    | **Low**  |
-| Average score `>= -0.5` and at least two chunks                 | **High** |
+| Average score `>= -0.5`, at least two scored chunks, none unscored | **High** |
 | Everything else                                                 | **Medium** |
 
 ### 5.3 Hard Filter Threshold
@@ -222,4 +258,4 @@ draft_answer  ──→  verify_answer(draft, context, mode, model)  ──→  
 
 ---
 
-*Last updated: 2026-05-30 | Maintainer: HarrisonGPT AI Governance*
+*Last updated: 2026-08-20 | Maintainer: HarrisonGPT AI Governance*
