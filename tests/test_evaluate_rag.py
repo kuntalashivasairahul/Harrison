@@ -33,7 +33,18 @@ def _load_evaluate_rag_module():
 
     # evaluate_rag.py and backend.llm.llm both use the new google.genai SDK.
     # Stub that path on a single google namespace module.
+    #
+    # The stub MUST be undone.  This function runs at import time, and leaving
+    # a bare google.genai.types in sys.modules poisoned every test collected
+    # afterwards: anything that later resolved a real SDK symbol (e.g.
+    # types.ThinkingConfig) silently got the stub instead and took a
+    # feature-missing code path.
+    saved = {
+        name: sys.modules.get(name)
+        for name in ("google", "google.genai", "google.genai.types")
+    }
     google_mod = sys.modules.get("google") or types.ModuleType("google")
+    saved_genai_attr = getattr(google_mod, "genai", None)
 
     # Stub google.genai (new SDK used by llm.py)
     new_genai = types.ModuleType("google.genai")
@@ -63,6 +74,17 @@ def _load_evaluate_rag_module():
         # Module-level side-effects (server calls, @dataclass quirk on
         # Python 3.14) may raise after _extract_json is already defined.
         pass
+    finally:
+        # Put the real SDK back before anything else imports it.
+        for name, module in saved.items():
+            if module is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = module
+        if saved_genai_attr is not None:
+            google_mod.genai = saved_genai_attr
+        elif hasattr(google_mod, "genai"):
+            del google_mod.genai
 
     if not hasattr(mod, "_extract_json"):
         raise ImportError("_extract_json not found in evaluate_rag")

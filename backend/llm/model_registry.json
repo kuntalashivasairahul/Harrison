@@ -11,8 +11,8 @@
         "verifier"
       ],
       "max_input_tokens": 12000,
-      "max_output_tokens": 3000,
-      "timeout_seconds": 30,
+      "max_output_tokens": 8192,
+      "timeout_seconds": 60,
       "privacy": "configured_external_provider",
       "priority": 10
     },

@@ -486,7 +486,11 @@ llm_router = LLMRouter(gemini_provider, prod_model, backup_model)
 # --------------------------------------------------------------------
 # LLM CONFIGURATION
 # --------------------------------------------------------------------
-SMART_SUMMARY_MAX_TOKENS = int(os.getenv("SMART_SUMMARY_MAX_TOKENS", "3000"))
+# A Harrison smart summary is legitimately long — a measured one runs ~6.6k
+# characters (~1,660 tokens) across a dozen sections — and Gemini 2.5 spends
+# further tokens on an internal reasoning pass for the draft. At 3,000 the
+# draft hit MAX_TOKENS on ordinary clinical topics and was returned truncated.
+SMART_SUMMARY_MAX_TOKENS = int(os.getenv("SMART_SUMMARY_MAX_TOKENS", "8000"))
 QA_MAX_TOKENS = int(os.getenv("QA_MAX_TOKENS", "3000"))
 # SMART_SUMMARY_CONTEXT_CHAR_LIMIT lives in backend/utils/fusion.py, which is
 # the module that actually applies it.  It was read here and never used.

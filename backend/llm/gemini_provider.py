@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 
-from backend.llm.contracts import LLMError, LLMErrorCategory, LLMRequest, LLMResult
+from backend.llm.contracts import LLMError, LLMErrorCategory, LLMRequest, LLMResult, LLMStage
 
 
 def normalize_provider_error(exc: Exception, provider: str) -> LLMError:
@@ -34,14 +34,19 @@ class GeminiProvider:
         started = time.perf_counter()
         try:
             client = self._key_manager_getter().next_client()
+            config_kwargs = {
+                "system_instruction": request.system_instruction,
+                "temperature": request.temperature,
+                "max_output_tokens": request.max_output_tokens,
+            }
+            thinking = self._thinking_config(request.stage)
+            if thinking is not None:
+                config_kwargs["thinking_config"] = thinking
+
             response = client.models.generate_content(
                 model=model,
                 contents=request.prompt,
-                config=self._generate_config(
-                    system_instruction=request.system_instruction,
-                    temperature=request.temperature,
-                    max_output_tokens=request.max_output_tokens,
-                ),
+                config=self._generate_config(**config_kwargs),
             )
             text, truncated = self._extract_response(response)
             finish_reason = "MAX_TOKENS" if truncated else "STOP"
@@ -59,6 +64,36 @@ class GeminiProvider:
             )
         except Exception as exc:  # noqa: BLE001
             raise normalize_provider_error(exc, self.name) from exc
+
+    #: Stages that must not spend their output budget on an internal reasoning
+    #: pass.  Gemini 2.5 models think by default, and those tokens come out of
+    #: max_output_tokens: a trivial verifier call measured 561 thinking tokens
+    #: against 17 tokens of answer.  On a real smart_summary the verifier has to
+    #: reproduce a ~1,660-token draft inside a 3,000-token ceiling, so thinking
+    #: pushed it over and it returned MAX_TOKENS.  Every smart summary then took
+    #: the draft_fallback path and was capped at Medium confidence — the answer
+    #: was never actually verified.
+    #:
+    #: The verifier is a deterministic (temperature=0) rewrite; it has nothing
+    #: to reason about.  The draft stage keeps thinking, where it earns its cost.
+    _NO_THINKING_STAGES = frozenset({LLMStage.VERIFIER, LLMStage.OPTIMIZER})
+
+    @classmethod
+    def _thinking_config(cls, stage: LLMStage):
+        # Imported at call time, not module scope.  A module-level binding is
+        # captured whenever this module happens to be first imported, and one
+        # test suite imports it while a stub SDK is installed in sys.modules —
+        # the binding then pointed at the stub for the rest of the process and
+        # this silently returned None.
+        if stage not in cls._NO_THINKING_STAGES:
+            return None
+        from google.genai import types as genai_types
+
+        thinking_config_cls = getattr(genai_types, "ThinkingConfig", None)
+        if thinking_config_cls is None:
+            # Older SDK without a thinking budget knob — nothing to disable.
+            return None
+        return thinking_config_cls(thinking_budget=0)
 
     @staticmethod
     def _generate_config(**kwargs):
