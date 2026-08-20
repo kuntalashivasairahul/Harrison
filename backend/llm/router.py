@@ -13,9 +13,7 @@ from pathlib import Path
 from backend.llm.contracts import LLMError, LLMErrorCategory, LLMRequest, LLMResult, LLMStage
 from backend.llm.groq_provider import GroqProvider
 
-# Use Uvicorn's configured handler so route diagnostics appear beside the
-# request completion log in the local server console.
-log = logging.getLogger("uvicorn.error")
+log = logging.getLogger(__name__)
 _REGISTRY_PATH = Path(__file__).with_name("model_registry.json")
 
 

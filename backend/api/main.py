@@ -8,9 +8,14 @@ from pathlib import Path
 import logging
 import os
 
-# Uvicorn configures its own error logger/handler, not the root application
-# logger.  Using it makes request-path diagnostics visible in server output.
-log = logging.getLogger("uvicorn.error")
+# Configure the "backend" logger before importing anything under it, so that
+# diagnostics emitted during module import are captured too.  See
+# backend/logging_config.py for why this is needed under uvicorn.
+from backend.logging_config import configure_logging
+
+configure_logging()
+
+log = logging.getLogger(__name__)
 
 from backend.retrieval import rag
 from backend.retrieval.rag import retrieve
