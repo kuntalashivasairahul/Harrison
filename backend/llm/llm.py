@@ -233,15 +233,41 @@ _PROD_PRIORITY = [
     "gemini-1.5-flash",
 ]
 
+# Cheap, fast models for the optimizer-fallback deployment.
+# Verify against client.models.list() when editing: every entry in the previous
+# list (gemini-2.0-flash-lite, gemini-1.5-flash, gemini-1.5-flash-8b) had been
+# retired, so discovery fell through to _DEFAULT_BACKUP — which was also retired.
+# The backup deployment 404'd on every call while /health reported it enabled.
+# Probed against the live account: a 404 means the model is not callable with
+# this key even though models.list() advertises it (gemini-2.5-flash-lite does
+# exactly that); a 503 means it exists and is merely busy. Only 503-class models
+# belong here.
 _BACKUP_PRIORITY = [
-    "gemini-2.0-flash-lite",
-    "gemini-1.5-flash",
-    "gemini-1.5-flash-8b",
+    "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite",
+    "gemini-3.5-flash",
 ]
 
 # Safe hardcoded defaults
 _DEFAULT_PROD = "gemini-2.5-flash"
-_DEFAULT_BACKUP = "gemini-1.5-flash"
+_DEFAULT_BACKUP = "gemini-3.5-flash-lite"
+
+
+
+def _select_model(priority: list[str], available: list[str], default: str) -> str:
+    """First priority entry that the account actually offers.
+
+    Exact match wins over prefix match: a bare substring test let the candidate
+    "gemini-2.5-flash" resolve to whichever of gemini-2.5-flash-image /
+    -lite / -preview-tts the API happened to list first.
+    """
+    for candidate in priority:
+        if candidate in available:
+            return candidate
+        prefixed = sorted(n for n in available if n.startswith(candidate))
+        if prefixed:
+            return prefixed[0]
+    return default
 
 
 def get_dynamic_models(api_key: str | None = None) -> tuple[str, str]:
@@ -289,26 +315,19 @@ def get_dynamic_models(api_key: str | None = None) -> tuple[str, str]:
             len(clean_names),
         )
 
-        # Select PROD model — first match in priority list
-        prod = _DEFAULT_PROD
-        for candidate in _PROD_PRIORITY:
-            if any(candidate in name for name in clean_names):
-                # Find the exact matching name
-                for name in clean_names:
-                    if candidate in name:
-                        prod = name
-                        break
-                break
+        prod = _select_model(_PROD_PRIORITY, clean_names, _DEFAULT_PROD)
+        backup = _select_model(_BACKUP_PRIORITY, clean_names, _DEFAULT_BACKUP)
 
-        # Select BACKUP model — first match in backup priority list
-        backup = _DEFAULT_BACKUP
-        for candidate in _BACKUP_PRIORITY:
-            if any(candidate in name for name in clean_names):
-                for name in clean_names:
-                    if candidate in name:
-                        backup = name
-                        break
-                break
+        for label, chosen in (("PROD", prod), ("BACKUP", backup)):
+            if chosen not in clean_names:
+                log.error(
+                    "get_dynamic_models: %s model %r is not in the account's model list — "
+                    "calls to it will 404. Update the priority lists in llm.py.",
+                    label, chosen,
+                )
+        # NOTE: presence in models.list() is necessary but NOT sufficient — the
+        # API advertises models that 404 on generateContent for a given key.
+        # Only a real call proves reachability.
 
         # Ensure backup != prod
         if backup == prod:
@@ -380,6 +399,49 @@ def __getattr__(name: str) -> str:
     if name == "BACKUP_MODEL":
         return backup_model()
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+# --------------------------------------------------------------------
+# TRANSIENT FAILURE POLICY
+# --------------------------------------------------------------------
+# The router already labels these categories fallback_eligible in its logs, but
+# ask_llm()/verify_answer() used to retry only on RATE_LIMITED — so a transient
+# Google 503 ("this model is currently experiencing high demand") failed on the
+# first attempt with the retry budget untouched, and the caller got the generic
+# error fallback about two seconds later. Live testing surfaced this; the unit
+# suite mocks the provider and never sees a 503.
+_RETRYABLE = {
+    LLMErrorCategory.RATE_LIMITED,
+    LLMErrorCategory.TIMEOUT,
+    LLMErrorCategory.UNAVAILABLE,
+}
+
+#: Base seconds for backoff on TIMEOUT/UNAVAILABLE. Quota errors do not sleep —
+#: they rotate to a different key, which is faster and more likely to work.
+LLM_RETRY_BACKOFF_SECONDS = float(os.getenv("LLM_RETRY_BACKOFF_SECONDS", "1.5"))
+
+
+def _handle_retryable(exc: LLMError, attempt: int, max_attempts: int, stage: str) -> bool:
+    """Return True if the caller should retry. Applies the right recovery."""
+    if exc.category not in _RETRYABLE or attempt >= max_attempts - 1:
+        return False
+
+    if exc.category is LLMErrorCategory.RATE_LIMITED:
+        log.warning(
+            "%s: quota error on attempt %d/%d — cooling down key and rotating.",
+            stage, attempt + 1, max_attempts,
+        )
+        key_manager.mark_rate_limited(exc.retry_after_seconds)
+        return True
+
+    delay = exc.retry_after_seconds or LLM_RETRY_BACKOFF_SECONDS * (2 ** attempt)
+    log.warning(
+        "%s: %s on attempt %d/%d — backing off %.1fs and retrying.",
+        stage, exc.category.value, attempt + 1, max_attempts, delay,
+    )
+    time.sleep(delay)
+    return True
+
 
 # --------------------------------------------------------------------
 # RETRY BUDGETS
@@ -588,16 +650,9 @@ def verify_answer(
 
         except LLMError as exc:
             last_exc = exc
-            if exc.category == LLMErrorCategory.RATE_LIMITED and attempt < VERIFIER_MAX_ATTEMPTS - 1:
-                log.warning(
-                    "verify_answer: quota error on attempt %d/%d — "
-                    "cooling down key and rotating.",
-                    attempt + 1,
-                    VERIFIER_MAX_ATTEMPTS,
-                )
-                key_manager.mark_rate_limited(exc.retry_after_seconds)
+            if _handle_retryable(exc, attempt, VERIFIER_MAX_ATTEMPTS, "verify_answer"):
                 continue
-            # Non-quota error or final attempt — fall through
+            # Non-retryable category, or the budget is spent
             break
 
     log.warning("verify_answer: all retries exhausted (%s) — returning draft.", last_exc)
@@ -923,16 +978,9 @@ def ask_llm(
 
         except LLMError as exc:
             last_exc = exc
-            if exc.category == LLMErrorCategory.RATE_LIMITED and attempt < DRAFT_MAX_ATTEMPTS - 1:
-                log.warning(
-                    "ask_llm: quota error on attempt %d/%d — "
-                    "cooling down key and rotating.",
-                    attempt + 1,
-                    DRAFT_MAX_ATTEMPTS,
-                )
-                key_manager.mark_rate_limited(exc.retry_after_seconds)
+            if _handle_retryable(exc, attempt, DRAFT_MAX_ATTEMPTS, "ask_llm"):
                 continue
-            # Non-quota error or final attempt — fall through
+            # Non-retryable category, or the budget is spent
             break
 
     log.error("ask_llm: all retries exhausted — returning safe error fallback. last_exc=%s", last_exc)

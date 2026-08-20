@@ -86,3 +86,40 @@ class TestRegistryBudget(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestModelSelection(unittest.TestCase):
+    """The backup model list had gone stale: every entry was retired, so
+    discovery fell through to a default that was also retired and 404'd."""
+
+    def test_exact_match_beats_prefix_match(self):
+        from backend.llm.llm import _select_model
+
+        available = ["gemini-2.5-flash-image", "gemini-2.5-flash", "gemini-2.5-flash-lite"]
+        self.assertEqual(_select_model(["gemini-2.5-flash"], available, "fallback"), "gemini-2.5-flash")
+
+    def test_prefix_match_is_deterministic(self):
+        from backend.llm.llm import _select_model
+
+        available = ["gemini-9-flash-tts", "gemini-9-flash-image"]
+        first = _select_model(["gemini-9-flash"], available, "fallback")
+        second = _select_model(["gemini-9-flash"], list(reversed(available)), "fallback")
+        self.assertEqual(first, second)
+
+    def test_priority_order_is_respected(self):
+        from backend.llm.llm import _select_model
+
+        available = ["model-b", "model-a"]
+        self.assertEqual(_select_model(["model-a", "model-b"], available, "x"), "model-a")
+
+    def test_falls_back_to_default_when_nothing_matches(self):
+        from backend.llm.llm import _select_model
+
+        self.assertEqual(_select_model(["nope"], ["other"], "the-default"), "the-default")
+
+    def test_backup_priority_does_not_name_retired_models(self):
+        from backend.llm.llm import _BACKUP_PRIORITY, _DEFAULT_BACKUP
+
+        retired = {"gemini-1.5-flash", "gemini-1.5-flash-8b", "gemini-2.0-flash-lite", "gemini-2.0-flash"}
+        self.assertFalse(retired & set(_BACKUP_PRIORITY))
+        self.assertNotIn(_DEFAULT_BACKUP, retired)
