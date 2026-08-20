@@ -19,7 +19,6 @@ from __future__ import annotations
 import unittest
 from unittest.mock import MagicMock, patch
 
-
 # -----------------------------------------------------------------------
 # Helpers
 # -----------------------------------------------------------------------
@@ -128,7 +127,7 @@ class TestAskLlm4TupleConsistency(unittest.TestCase):
             client.models.generate_content.return_value = response
             mock_km.next_client.return_value = client
             mock_types.GenerateContentConfig.side_effect = _FakeConfig
-            from backend.llm.llm import ask_llm, QA_MAX_TOKENS
+            from backend.llm.llm import QA_MAX_TOKENS, ask_llm
             ask_llm("A" * 100, "test", mode="qa", disable_verifier=True)
 
         config = client.models.generate_content.call_args.kwargs["config"]
@@ -142,7 +141,7 @@ class TestAskLlm4TupleConsistency(unittest.TestCase):
             client.models.generate_content.return_value = response
             mock_km.next_client.return_value = client
             mock_types.GenerateContentConfig.side_effect = _FakeConfig
-            from backend.llm.llm import ask_llm, SMART_SUMMARY_MAX_TOKENS
+            from backend.llm.llm import SMART_SUMMARY_MAX_TOKENS, ask_llm
             ask_llm("A" * 100, "test", mode="smart_summary", disable_verifier=True)
 
         config = client.models.generate_content.call_args.kwargs["config"]

@@ -11,10 +11,8 @@ Unit tests for the refactored KeyManager:
 from __future__ import annotations
 
 import threading
-import types as _types
 import unittest
 from unittest.mock import MagicMock, patch
-
 
 # ---------------------------------------------------------------------------
 # Helpers to build a KeyManager from arbitrary key lists without env vars
@@ -47,8 +45,6 @@ class TestKeyLoading(unittest.TestCase):
             "GEMINI_API_KEY_2": "key-b",
         }
         with patch.dict("os.environ", env, clear=True):
-            from importlib import reload
-            import backend.llm.llm as llm_mod
             # Re-create a fresh instance (don't reload the module — singleton)
             from backend.llm.llm import KeyManager
             km = KeyManager.__new__(KeyManager)
@@ -70,8 +66,10 @@ class TestKeyLoading(unittest.TestCase):
     def test_main_key_is_loaded_before_numbered_keys(self):
         env = {"GEMINI_API_KEY": "bare-key"}
         with patch.dict("os.environ", env, clear=True):
+            import os
+            import threading
+
             from backend.llm.llm import KeyManager
-            import os, threading
             km = KeyManager.__new__(KeyManager)
             km._lock = threading.Lock()
             km._keys = []
@@ -103,8 +101,10 @@ class TestKeyLoading(unittest.TestCase):
             "GEMINI_API_KEY_5": "key-5",
         }
         with patch.dict("os.environ", env, clear=True):
+            import os
+            import threading
+
             from backend.llm.llm import KeyManager
-            import os, threading
             km = KeyManager.__new__(KeyManager)
             km._lock = threading.Lock()
             km._keys = []

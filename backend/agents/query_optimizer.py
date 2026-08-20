@@ -45,8 +45,11 @@ load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 from backend.llm.contracts import LLMRequest, LLMStage
 from backend.llm.llm import llm_router
 
-# Keep expansion tokens tight — we only need a small JSON object.
-_MAX_TOKENS = 256
+# The optimizer only needs a small JSON object, but the approved Groq model is
+# a reasoning model: it spends tokens on an internal chain before emitting the
+# answer.  At 256 the budget was consumed by reasoning and the response came
+# back with finish_reason="length" and empty content on every clinical query.
+_MAX_TOKENS = 512
 
 _TEMPERATURE = 0.0  # Deterministic — query rewriting must be stable.
 
@@ -155,22 +158,6 @@ _USER_TEMPLATE = "Raw query: {raw_query}"
 # ---------------------------------------------------------------------------
 
 _JSON_BLOCK_RE = re.compile(r"\{.*?\}", re.DOTALL)
-
-
-def _is_quota_error(exc: Exception) -> bool:
-    """Return True when an exception indicates an exhausted API quota."""
-    text = str(exc).lower()
-    return any(
-        marker in text
-        for marker in (
-            "429",
-            "quota",
-            "rate limit",
-            "resource exhausted",
-            "resourceexhausted",
-            "too many requests",
-        )
-    )
 
 
 def _extract_json(text: str) -> dict | None:

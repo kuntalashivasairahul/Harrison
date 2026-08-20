@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import time
-from typing import Callable
-
-from google.genai import types
+from collections.abc import Callable
 
 from backend.llm.contracts import LLMError, LLMErrorCategory, LLMRequest, LLMResult
 

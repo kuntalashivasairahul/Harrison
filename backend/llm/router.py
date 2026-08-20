@@ -7,6 +7,7 @@ import logging
 import os
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -63,8 +64,18 @@ class LLMRouter:
         self._last_errors: dict[str, str] = {}
         self._default_cooldown = float(os.getenv("LLM_PROVIDER_COOLDOWN_SECONDS", "60"))
 
+    def _cooling_down(self, alias: str) -> bool:
+        """Read cooldown state under the lock.
+
+        The previous inline check was an unlocked ``alias in self._cooldowns``
+        followed by ``self._cooldowns[alias]`` — a check-then-get against a
+        dict another thread writes to in ``_cooldown()``.
+        """
+        with self._lock:
+            return self._cooldowns.get(alias, 0.0) > time.monotonic()
+
     def _enabled(self, deployment: Deployment) -> bool:
-        if not deployment.enabled or deployment.alias in self._cooldowns and self._cooldowns[deployment.alias] > time.monotonic():
+        if not deployment.enabled or self._cooling_down(deployment.alias):
             return False
         if deployment.provider == "groq":
             return os.getenv("GROQ_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"} and self._groq_provider.configured
@@ -76,11 +87,17 @@ class LLMRouter:
             key=lambda deployment: deployment.priority,
         )
 
+    @staticmethod
+    def _value(model: str | Callable[[], str]) -> str:
+        """Deployments may be wired with a callable so that model discovery
+        happens on first use rather than at import time."""
+        return model() if callable(model) else model
+
     def _resolve_model(self, deployment: Deployment) -> str:
         if deployment.model == "dynamic-prod":
-            return self._prod_model
+            return self._value(self._prod_model)
         if deployment.model == "dynamic-backup":
-            return self._backup_model
+            return self._value(self._backup_model)
         if deployment.alias == "groq-optimizer":
             return os.getenv("GROQ_OPTIMIZER_MODEL", deployment.model).strip() or deployment.model
         return deployment.model
@@ -103,6 +120,18 @@ class LLMRouter:
                 f"Prompt exceeds configured input capacity for {deployment.alias}.",
                 provider=deployment.provider,
             )
+        # The registry is a hard capability ceiling, so clamping is correct —
+        # but clamping *silently* meant that raising SMART_SUMMARY_MAX_TOKENS
+        # past the registry cap appeared to work and changed nothing.  Say so.
+        if request.max_output_tokens > deployment.max_output_tokens:
+            log.warning(
+                "llm_route: requested max_output_tokens=%d exceeds the registry cap for %s (%d) — clamping. "
+                "Raise max_output_tokens in backend/llm/model_registry.json to lift this ceiling.",
+                request.max_output_tokens,
+                deployment.alias,
+                deployment.max_output_tokens,
+            )
+
         bounded = LLMRequest(
             prompt=request.prompt,
             system_instruction=request.system_instruction,
@@ -143,15 +172,20 @@ class LLMRouter:
 
     def status(self) -> list[dict[str, object]]:
         now = time.monotonic()
+        # Snapshot under the lock, then build the report outside it: _enabled()
+        # takes the same non-reentrant lock, so calling it from inside would
+        # deadlock.
         with self._lock:
-            return [
-                {
-                    "alias": deployment.alias,
-                    "provider": deployment.provider,
-                    "enabled": self._enabled(deployment),
-                    "stages": [stage.value for stage in deployment.stages],
-                    "cooling_down": self._cooldowns.get(deployment.alias, 0.0) > now,
-                    "last_error": self._last_errors.get(deployment.alias),
-                }
-                for deployment in sorted(self._deployments.values(), key=lambda item: item.priority)
-            ]
+            cooldowns = dict(self._cooldowns)
+            last_errors = dict(self._last_errors)
+        return [
+            {
+                "alias": deployment.alias,
+                "provider": deployment.provider,
+                "enabled": self._enabled(deployment),
+                "stages": [stage.value for stage in deployment.stages],
+                "cooling_down": cooldowns.get(deployment.alias, 0.0) > now,
+                "last_error": last_errors.get(deployment.alias),
+            }
+            for deployment in sorted(self._deployments.values(), key=lambda item: item.priority)
+        ]

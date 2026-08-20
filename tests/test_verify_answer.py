@@ -15,9 +15,8 @@ Verifies that:
 """
 from __future__ import annotations
 
-import types as _builtins_types
 import unittest
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 
 def _make_config_capture():
@@ -60,7 +59,7 @@ class TestVerifyAnswerNewSDK(unittest.TestCase):
             mock_km.next_client.return_value = fake_client
             mock_types.GenerateContentConfig.side_effect = FakeConfig
 
-            from backend.llm.llm import verify_answer, QA_MAX_TOKENS, SMART_SUMMARY_MAX_TOKENS
+            from backend.llm.llm import QA_MAX_TOKENS, SMART_SUMMARY_MAX_TOKENS, verify_answer
 
             verify_answer("Draft answer.", "Some context.", mode=mode)
 

@@ -1,14 +1,16 @@
 # backend/llm/llm.py
 # Smart Summary v1 – Gemini API Key Rotation & Dynamic Model Selection
 
-import os
 import logging
+import os
 import threading
 import time
-from google import genai
-from google.genai import types
-from dotenv import load_dotenv
 from pathlib import Path
+
+from dotenv import load_dotenv
+from google import genai
+from google.genai import types  # noqa: F401  (patched by tests)
+
 from backend.llm.contracts import LLMError, LLMErrorCategory, LLMRequest, LLMStage
 from backend.llm.gemini_provider import GeminiProvider
 from backend.llm.router import LLMRouter
@@ -352,8 +354,58 @@ def get_dynamic_models(api_key: str | None = None) -> tuple[str, str]:
         return _DEFAULT_PROD, _DEFAULT_BACKUP
 
 
-# Resolve models once at import time
-PROD_MODEL, BACKUP_MODEL = get_dynamic_models(key_manager.get_current_key())
+# --------------------------------------------------------------------
+# LAZY MODEL RESOLUTION
+# --------------------------------------------------------------------
+# This used to be a module-level call:
+#
+#     PROD_MODEL, BACKUP_MODEL = get_dynamic_models(key_manager.get_current_key())
+#
+# which meant `import backend.llm.llm` made a live network round-trip to
+# Google's model-list API.  Importing the module blocked on a third party,
+# imports stopped being hermetic (tests and diagnostic scripts hit the network
+# too), and a slow or unreachable API delayed startup before /health could
+# answer.  Resolution now happens on first use, or eagerly at application
+# startup via ``resolve_models()``.
+_model_lock = threading.Lock()
+_resolved_models: tuple[str, str] | None = None
+
+
+def resolve_models(force: bool = False) -> tuple[str, str]:
+    """Return ``(prod_model, backup_model)``, discovering them once.
+
+    Safe to call from anywhere; the discovery call is made at most once per
+    process unless ``force`` is set.  Falls back to the hardcoded defaults if
+    discovery fails, exactly as before.
+    """
+    global _resolved_models
+    if _resolved_models is not None and not force:
+        return _resolved_models
+    with _model_lock:
+        if _resolved_models is None or force:
+            _resolved_models = get_dynamic_models(key_manager.get_current_key())
+        return _resolved_models
+
+
+def prod_model() -> str:
+    return resolve_models()[0]
+
+
+def backup_model() -> str:
+    return resolve_models()[1]
+
+
+def __getattr__(name: str) -> str:
+    """Keep ``llm.PROD_MODEL`` / ``llm.BACKUP_MODEL`` working (PEP 562).
+
+    Reading either attribute triggers discovery on first access instead of at
+    import.  Existing call sites and scripts need no change.
+    """
+    if name == "PROD_MODEL":
+        return prod_model()
+    if name == "BACKUP_MODEL":
+        return backup_model()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 # --------------------------------------------------------------------
 # RETRY / ROTATION HELPER
@@ -365,16 +417,6 @@ PROD_MODEL, BACKUP_MODEL = get_dynamic_models(key_manager.get_current_key())
 MAX_RETRIES = max(key_manager.key_count, 3)
 DRAFT_MAX_ATTEMPTS = int(os.getenv("LLM_DRAFT_MAX_ATTEMPTS", "3"))
 VERIFIER_MAX_ATTEMPTS = int(os.getenv("LLM_VERIFIER_MAX_ATTEMPTS", "2"))
-
-
-def _is_quota_error(exc: Exception) -> bool:
-    """Return True if the exception looks like a 429 / quota-exceeded error."""
-    text = str(exc).lower()
-    return any(
-        marker in text
-        for marker in ("429", "quota", "rate limit", "resource exhausted",
-                       "resourceexhausted", "too many requests")
-    )
 
 
 def _extract_text_safely(response) -> tuple[str, bool]:
@@ -438,7 +480,7 @@ def _extract_text_safely(response) -> tuple[str, bool]:
 # Created after model discovery and response parsing exist.  The getter keeps
 # the current KeyManager patchable for tests and for the process-wide pool.
 gemini_provider = GeminiProvider(lambda: key_manager, _extract_text_safely)
-llm_router = LLMRouter(gemini_provider, PROD_MODEL, BACKUP_MODEL)
+llm_router = LLMRouter(gemini_provider, prod_model, backup_model)
 
 
 # --------------------------------------------------------------------
@@ -446,27 +488,13 @@ llm_router = LLMRouter(gemini_provider, PROD_MODEL, BACKUP_MODEL)
 # --------------------------------------------------------------------
 SMART_SUMMARY_MAX_TOKENS = int(os.getenv("SMART_SUMMARY_MAX_TOKENS", "3000"))
 QA_MAX_TOKENS = int(os.getenv("QA_MAX_TOKENS", "3000"))
-SMART_SUMMARY_CONTEXT_CHAR_LIMIT = int(os.getenv("SMART_SUMMARY_CONTEXT_CHAR_LIMIT", "12000"))
+# SMART_SUMMARY_CONTEXT_CHAR_LIMIT lives in backend/utils/fusion.py, which is
+# the module that actually applies it.  It was read here and never used.
 
 REFUSAL_STR = "Insufficient information in the provided context."
 MISSING_INFO_STR = "Information not present in the retrieved Harrison excerpt."
 SMART_SUMMARY_ACK = "Topic received — generating Harrison Smart Summary."
 
-SMART_SUMMARY_SECTIONS = [
-  "# 1. Harrison Definition (verbatim essence)",
-  "# 2. High-Yield Overview (2–4 lines)",
-  "# 3. Etiology / Causes (Harrison classification)",
-  "# 4. Pathophysiology (with a compressed Harrison-style flowchart)",
-  "# 5. Clinical Manifestations",
-  "# 6. Diagnostic Criteria (with key Harrison lines emphasized)",
-  "# 7. Investigations (important Harrison-points only)",
-  "# 8. Severity Scoring Systems (Ranson, BISAP, APACHE II)",
-  "# 9. Complications (local + systemic)",
-  "# 10. Management (Acute phase → nutritional → complications)",
-  "# 11. Important Harrison Tables (compress + reconstruct)",
-  "# 12. Harrison Flowcharts (shortened but accurate)",
-  "# 13. One-page exam-revision sheet at the end",
-]
 
 
 # --------------------------------------------------------------------
@@ -496,7 +524,7 @@ def verify_answer(
         exceptions — the returned text is the original draft, not verified.
     """
     if model is None:
-        model = PROD_MODEL
+        model = prod_model()
 
     answer = (answer or "").strip()
     context = (context or "").strip()
@@ -744,7 +772,7 @@ def ask_llm(
     """
     import time
     if model is None:
-        model = PROD_MODEL
+        model = prod_model()
 
     if not fused_context or len(fused_context.strip()) < 20:
         return REFUSAL_STR, "", False, "error_fallback"

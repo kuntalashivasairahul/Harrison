@@ -17,6 +17,30 @@ def _retry_after_from_message(message: str) -> float | None:
     return float(match.group(1)) if match else None
 
 
+# Models that spend output tokens on an internal reasoning pass before the
+# answer.  Left unbounded they exhaust a small max_tokens budget and return
+# finish_reason="length" with empty content — which is exactly how the
+# optimizer silently degraded to its local fallback on every query.
+_REASONING_MODEL_MARKERS = ("gpt-oss", "qwen3", "deepseek-r1")
+
+#: "low" keeps the reasoning pass short; the optimizer only emits a small JSON
+#: object, so a long chain buys nothing and costs latency.
+_DEFAULT_REASONING_EFFORT = "low"
+
+
+def _is_reasoning_model(model: str) -> bool:
+    lowered = (model or "").lower()
+    return any(marker in lowered for marker in _REASONING_MODEL_MARKERS)
+
+
+def _reasoning_effort_for(model: str) -> str | None:
+    """Return the reasoning_effort to send, or None if unsupported/disabled."""
+    if not _is_reasoning_model(model):
+        return None
+    effort = os.getenv("GROQ_REASONING_EFFORT", _DEFAULT_REASONING_EFFORT).strip().lower()
+    return effort if effort in {"none", "low", "medium", "high"} else _DEFAULT_REASONING_EFFORT
+
+
 class GroqProvider:
     name = "groq"
 
@@ -34,6 +58,12 @@ class GroqProvider:
         started = time.perf_counter()
         try:
             client = Groq(api_key=self._api_key, timeout=request.deadline_seconds)
+
+            extra: dict[str, object] = {}
+            effort = _reasoning_effort_for(model)
+            if effort is not None:
+                extra["reasoning_effort"] = effort
+
             response = client.chat.completions.create(
                 model=model,
                 messages=[
@@ -42,6 +72,7 @@ class GroqProvider:
                 ],
                 temperature=request.temperature,
                 max_tokens=request.max_output_tokens,
+                **extra,
             )
             choice = response.choices[0] if response.choices else None
             text = (getattr(getattr(choice, "message", None), "content", None) or "").strip()

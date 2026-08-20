@@ -6,7 +6,10 @@
       "provider": "gemini",
       "model": "dynamic-prod",
       "enabled": true,
-      "stages": ["draft", "verifier"],
+      "stages": [
+        "draft",
+        "verifier"
+      ],
       "max_input_tokens": 12000,
       "max_output_tokens": 3000,
       "timeout_seconds": 30,
@@ -18,7 +21,9 @@
       "provider": "gemini",
       "model": "dynamic-backup",
       "enabled": true,
-      "stages": ["optimizer"],
+      "stages": [
+        "optimizer"
+      ],
       "max_input_tokens": 4000,
       "max_output_tokens": 256,
       "timeout_seconds": 8,
@@ -28,11 +33,13 @@
     {
       "alias": "groq-optimizer",
       "provider": "groq",
-      "model": "llama-3.1-8b-instant",
+      "model": "openai/gpt-oss-20b",
       "enabled": true,
-      "stages": ["optimizer"],
+      "stages": [
+        "optimizer"
+      ],
       "max_input_tokens": 4000,
-      "max_output_tokens": 256,
+      "max_output_tokens": 512,
       "timeout_seconds": 5,
       "privacy": "configured_external_provider",
       "priority": 10
