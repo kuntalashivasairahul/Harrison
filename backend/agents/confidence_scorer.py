@@ -112,15 +112,27 @@ def calculate_confidence(
         return "Low"
 
     # ── Signal 1: Average cross-encoder score across all chunks ──────────
-    scores = []
+    # A chunk without a usable score is missing evidence, not proof of bad
+    # evidence.  Bailing out of the loop on the first one discarded every other
+    # chunk's score, so a single unscored chunk forced "Low" even when the rest
+    # of the context was strong.  Unusable scores are counted and penalised
+    # instead: they can block "High", and they force "Low" only when they are
+    # the majority of the retrieved context.
+    scores: list[float] = []
+    unusable: int = 0
     for chunk in chunks:
         try:
             score = chunk.get("score")
             if score is None:
-                return "Low"
+                unusable += 1
+                continue
             scores.append(float(score))
         except (AttributeError, TypeError, ValueError):
-            return "Low"
+            unusable += 1
+
+    if not scores or unusable >= len(chunks) / 2:
+        return "Low"
+
     avg_score: float = sum(scores) / len(scores)
 
     # ── Signal 2: Verification divergence ────────────────────────────────
@@ -140,7 +152,12 @@ def calculate_confidence(
     if avg_score < _MED_AVG_SCORE:
         return "Low"
 
-    if avg_score >= _HIGH_AVG_SCORE and len(chunks) >= _MIN_CHUNKS_FOR_HIGH:
+    # "High" requires that every retrieved chunk was actually scored.
+    if (
+        avg_score >= _HIGH_AVG_SCORE
+        and len(scores) >= _MIN_CHUNKS_FOR_HIGH
+        and unusable == 0
+    ):
         return "High"
 
     return "Medium"

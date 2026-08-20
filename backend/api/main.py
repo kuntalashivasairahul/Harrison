@@ -1,34 +1,35 @@
 # backend/main.py
 
-from fastapi import FastAPI, Request
-from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
-from typing import Any, Dict, List, Literal
-from pathlib import Path
 import logging
 import os
+import secrets
+import threading
+import time as _time
+from collections import deque
+from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import Any, Literal
+
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
 
 # Configure the "backend" logger before importing anything under it, so that
 # diagnostics emitted during module import are captured too.  See
 # backend/logging_config.py for why this is needed under uvicorn.
 from backend.logging_config import configure_logging
+from backend.observability import metrics, new_request_id, request_id_var
 
 configure_logging()
 
 log = logging.getLogger(__name__)
 
-from backend.retrieval import rag
-from backend.retrieval.rag import retrieve
-from backend.utils.fusion import fuse_context
-from backend.processing.evidence import extract_evidence, extract_sources
-from backend.llm.llm import ask_llm, REFUSAL_STR, key_manager, llm_router
 from backend.agents.confidence_scorer import calculate_confidence
-from backend.rendering.page_resolver import resolve_page_urls
+from backend.agents.context_router import route_and_sort_context
 from backend.agents.query_optimizer import optimize_query
 from backend.agents.semantic_cache import SemanticCache
-from backend.agents.context_router import route_and_sort_context
-from backend.retrieval.embeddings import embed_text, embedding_dimension
-from backend.retrieval.rerank import warmup_reranker
 from backend.config import (
     DEFAULT_K,
     DEFAULT_RERANK_POOL,
@@ -38,8 +39,159 @@ from backend.config import (
     RERANK_SCORE_THRESHOLD,
     RRF_K,
 )
+from backend.llm.llm import ask_llm, key_manager, llm_router, resolve_models
+from backend.processing.evidence import extract_evidence, extract_sources
+from backend.rendering.page_resolver import resolve_page_urls
+from backend.retrieval import rag
+from backend.retrieval.embeddings import embed_text, embedding_dimension
+from backend.retrieval.embeddings import warmup as embeddings_warmup
+from backend.retrieval.rag import retrieve
+from backend.retrieval.rerank import warmup_reranker
+from backend.utils.fusion import fuse_context
 
-app = FastAPI(title="HarrisonGPT")
+MAX_QUERY_CHARS = int(os.getenv("HARRISON_MAX_QUERY_CHARS", "2000"))
+RATE_LIMIT_PER_MINUTE = int(os.getenv("HARRISON_RATE_LIMIT_PER_MINUTE", "30"))
+ADMIN_TOKEN = os.getenv("HARRISON_ADMIN_TOKEN", "").strip()
+CORS_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv("HARRISON_CORS_ORIGINS", "").split(",")
+    if origin.strip()
+]
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Pay every one-off cost here rather than at import or on first request.
+
+    Loading the encoder, the FAISS index, the chunk registry and the BM25 index
+    is deliberate startup work.  Doing it at import time — as this project used
+    to — made every test run and diagnostic script pay for it, and made module
+    import depend on a live network call to Google's model-list API.
+    """
+    started = _time.perf_counter()
+
+    embeddings_warmup()
+    warmup_reranker()
+    rag.warmup()
+
+    try:
+        prod, backup = resolve_models()
+        log.info("HarrisonGPT: LLM models resolved  prod=%s  backup=%s", prod, backup)
+    except Exception:
+        log.exception("HarrisonGPT: model discovery failed at startup; defaults will be used.")
+
+    log.info("HarrisonGPT: warm-up complete in %.1fs.", _time.perf_counter() - started)
+
+    if not ADMIN_TOKEN:
+        log.warning(
+            "HarrisonGPT: HARRISON_ADMIN_TOKEN is unset — /admin/* endpoints are disabled."
+        )
+    yield
+
+
+app = FastAPI(title="HarrisonGPT", lifespan=lifespan)
+
+# --------------------------------------------------------------------
+# CORS — opt-in only.  An empty HARRISON_CORS_ORIGINS means no browser
+# origin may call this API cross-site, which is the right default for a
+# service that answers from a licensed textbook.
+# --------------------------------------------------------------------
+if CORS_ORIGINS:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=CORS_ORIGINS,
+        allow_credentials=False,
+        allow_methods=["GET", "POST"],
+        allow_headers=["*"],
+    )
+
+
+# --------------------------------------------------------------------
+# RATE LIMITING — fixed window per client, in-process.
+# Retrieval runs a cross-encoder and two Gemini calls per request; without
+# a bound, one client can drain the whole key pool.  Deliberately simple:
+# a single process, no dependency.  Put a real limiter in front of this if
+# you ever run more than one worker.
+# --------------------------------------------------------------------
+_rate_lock = threading.Lock()
+_rate_hits: dict[str, deque] = {}
+
+
+def _rate_limit_exceeded(client: str) -> bool:
+    if RATE_LIMIT_PER_MINUTE <= 0:
+        return False
+    now = _time.monotonic()
+    with _rate_lock:
+        hits = _rate_hits.setdefault(client, deque())
+        while hits and now - hits[0] > 60.0:
+            hits.popleft()
+        if len(hits) >= RATE_LIMIT_PER_MINUTE:
+            return True
+        hits.append(now)
+        # Keep the table from growing without bound across many clients.
+        if len(_rate_hits) > 10_000:
+            for key in [k for k, v in _rate_hits.items() if not v]:
+                _rate_hits.pop(key, None)
+        return False
+
+
+@app.middleware("http")
+async def request_id_middleware(request: Request, call_next):
+    """Tag the request so every log line it produces can be correlated."""
+    incoming = request.headers.get("X-Request-ID", "").strip()
+    request_id = incoming[:64] if incoming else new_request_id()
+    token = request_id_var.set(request_id)
+    try:
+        response = await call_next(request)
+    finally:
+        request_id_var.reset(token)
+    response.headers["X-Request-ID"] = request_id
+    return response
+
+
+@app.middleware("http")
+async def rate_limit_middleware(request: Request, call_next):
+    if request.url.path == "/ask":
+        client = request.client.host if request.client else "unknown"
+        if _rate_limit_exceeded(client):
+            metrics.increment("rate_limited")
+            log.warning("rate_limit: client=%s exceeded %d req/min", client, RATE_LIMIT_PER_MINUTE)
+            return JSONResponse(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                content={"detail": "Rate limit exceeded. Please retry in a minute."},
+                headers={"Retry-After": "60"},
+            )
+    return await call_next(request)
+
+
+# --------------------------------------------------------------------
+# EXCEPTION BOUNDARY — never return a stack trace to a caller.
+# --------------------------------------------------------------------
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    metrics.increment("unhandled_error")
+    log.exception("Unhandled error on %s %s", request.method, request.url.path)
+    return JSONResponse(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        content={"detail": "Internal server error. The failure has been logged."},
+    )
+
+
+# --------------------------------------------------------------------
+# ADMIN AUTH — a shared token supplied via X-Admin-Token.
+# With no token configured the admin surface is closed, not open.
+# --------------------------------------------------------------------
+def require_admin(x_admin_token: str = Header(default="")) -> None:
+    if not ADMIN_TOKEN:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Admin endpoints are disabled. Set HARRISON_ADMIN_TOKEN to enable them.",
+        )
+    if not secrets.compare_digest(x_admin_token or "", ADMIN_TOKEN):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing admin token.",
+        )
 
 # --------------------------------------------------------------------
 # STATIC FILES – serve pre-rendered Harrison page images
@@ -62,14 +214,7 @@ CACHE_SCHEMA_VERSION = "semantic-cache-v2"
 _cache = SemanticCache()
 
 
-@app.on_event("startup")
-def warmup_models() -> None:
-    """Move cross-encoder initialization out of the first user request."""
-    warmup_reranker()
-    log.info("HarrisonGPT: reranker warm-up complete.")
-
-
-def _vectorstore_fingerprint() -> Dict[str, int | None]:
+def _vectorstore_fingerprint() -> dict[str, int | None]:
     """Small cache-busting fingerprint for the loaded vectorstore."""
     return {
         "faiss_dim": int(rag.index.d) if rag.index is not None else None,
@@ -83,7 +228,7 @@ def _cache_signature(
     mode: str,
     disable_verifier: bool,
     final_k: int,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Exact-match metadata required before semantic cache similarity."""
     retrieval_k = SMART_SUMMARY_K if mode == "smart_summary" else DEFAULT_K
     rerank_pool = (
@@ -133,7 +278,9 @@ def _should_save_to_cache(
 # --------------------------------------------------------------------
 
 class QueryRequest(BaseModel):
-    query: str
+    # Bounded: an unbounded query is embedded by BGE-M3 and sent to the LLM,
+    # so a multi-megabyte string is both a CPU and a cost amplifier.
+    query: str = Field(min_length=1, max_length=MAX_QUERY_CHARS)
     mode: Literal["qa", "smart_summary"] = "smart_summary"  # default to smart summary
     disable_verifier: bool = False
 
@@ -154,12 +301,12 @@ class QueryResponse(BaseModel):
 
     answer: str
     confidence: str = Field(default="Pending", description="Confidence level of the answer")
-    sources: List[str] = Field(default_factory=list, description="Source page references")
-    visual_context: List[Dict[str, str]] = Field(
+    sources: list[str] = Field(default_factory=list, description="Source page references")
+    visual_context: list[dict[str, str]] = Field(
         default_factory=list,
         description="Image URLs for each source page (thumbnail_url, full_url)",
     )
-    timings: Dict[str, float] = Field(
+    timings: dict[str, float] = Field(
         default_factory=dict,
         description="Timing breakdown of the request stages in seconds",
     )
@@ -210,6 +357,9 @@ def ask_question(req: QueryRequest, request: Request) -> QueryResponse:
             total_time,
             timings["optimizer"],
         )
+        metrics.increment("ask_total")
+        metrics.increment("ask_non_medical")
+        metrics.observe_timings(timings)
         return QueryResponse(
             answer=(
                 "HarrisonGPT is a medical reference assistant grounded exclusively "
@@ -251,7 +401,7 @@ def ask_question(req: QueryRequest, request: Request) -> QueryResponse:
     # ----------------------------------------------------------------
     # embed_text() reuses the already-loaded retrieval embedding model.
     # The vector is flattened to a plain list for JSON-serialisable storage.
-    query_embedding: List[float] = embed_text(search_query).flatten().tolist()
+    query_embedding: list[float] = embed_text(search_query).flatten().tolist()
 
     cached = _cache.check_cache(query_embedding, metadata=cache_signature)
     if cached is not None:
@@ -263,11 +413,23 @@ def ask_question(req: QueryRequest, request: Request) -> QueryResponse:
             total_time,
             timings["optimizer"],
         )
+        # visual_context is rebuilt from the cached page labels against THIS
+        # request's host.  It used to be served straight from the cache, which
+        # baked in whichever host first populated the entry — serve the same
+        # cache behind a different hostname and every image link pointed at the
+        # old one.  base_url is deliberately not part of the cache signature;
+        # the labels are host-independent, the URLs are not.
+        metrics.increment("ask_total")
+        metrics.increment("cache_hit")
+        metrics.observe_timings(timings)
         return QueryResponse(
             answer=cached["answer"],
             confidence=cached["confidence"],
             sources=cached["sources"],
-            visual_context=cached["visual_context"],
+            visual_context=resolve_page_urls(
+                sources=cached.get("sources", []),
+                base_url=str(request.base_url).rstrip("/"),
+            ),
             timings=timings,
         )
 
@@ -321,7 +483,7 @@ def ask_question(req: QueryRequest, request: Request) -> QueryResponse:
 
     # 6️⃣ Extract unique, sorted page references for the sources field.
     #    Returns [] safely when retrieved_chunks is empty.
-    sources: List[str] = extract_sources(retrieved_chunks)
+    sources: list[str] = extract_sources(retrieved_chunks)
 
     # 7️⃣ Calculate the deterministic confidence label.
     #    ConfidenceScorer combines two signals:
@@ -339,15 +501,17 @@ def ask_question(req: QueryRequest, request: Request) -> QueryResponse:
     # ── Confidence cap: enforce trust levels based on returned_path + truncation ──
     #
     # Rule table:
-    #   verified         + not truncated  → any confidence allowed (High OK)
-    #   verified         + truncated      → Medium max (draft was cut)
-    #   draft_fallback   + any            → Medium max (verifier failed)
-    #   partial_verified + any            → Medium max (incomplete verification)
+    #   verified          + not truncated → any confidence allowed (High OK)
+    #   verified          + truncated     → Medium max (draft was cut)
+    #   draft_fallback    + any           → Medium max (verifier failed)
     #   graceful_fallback + any           → Low max (both layers failed)
-    #   error_fallback   + any            → Low max (all API retries failed)
+    #   error_fallback    + any           → Low max (all API retries failed)
+    #
+    # These are the only four paths ask_llm() returns; the table previously
+    # also handled a "partial_verified" path that nothing ever produced.
     if returned_path in ("graceful_fallback", "error_fallback"):
         confidence = "Low"
-    elif returned_path in ("draft_fallback", "partial_verified") and confidence == "High":
+    elif returned_path == "draft_fallback" and confidence == "High":
         confidence = "Medium"
     elif was_truncated and confidence == "High":
         confidence = "Medium"
@@ -374,7 +538,7 @@ def ask_question(req: QueryRequest, request: Request) -> QueryResponse:
     #    base_url is derived from the live Request so this works on any
     #    host/port without hardcoding (localhost, staging, or production).
     base_url: str = str(request.base_url).rstrip("/")
-    visual_context: List[Dict[str, str]] = resolve_page_urls(
+    visual_context: list[dict[str, str]] = resolve_page_urls(
         sources=sources,
         base_url=base_url,
     )
@@ -396,11 +560,12 @@ def ask_question(req: QueryRequest, request: Request) -> QueryResponse:
                 "optimizer_failed": optimizer_failed,
                 "fallback_to_original_query": fallback_to_original,
             },
+            # Only host-independent data is persisted; visual_context is
+            # derived from `sources` on read.
             response_data={
-                "answer":         answer,
-                "confidence":     confidence,
-                "sources":        sources,
-                "visual_context": visual_context,
+                "answer":     answer,
+                "confidence": confidence,
+                "sources":    sources,
             },
         )
     else:
@@ -427,6 +592,16 @@ def ask_question(req: QueryRequest, request: Request) -> QueryResponse:
         timings["retry"],
     )
 
+    metrics.increment("ask_total")
+    metrics.increment("cache_miss")
+    metrics.increment(f"returned_path_{returned_path}")
+    metrics.increment(f"confidence_{confidence.lower()}")
+    if optimizer_failed:
+        metrics.increment("optimizer_failed")
+    if was_truncated:
+        metrics.increment("truncated")
+    metrics.observe_timings(timings)
+
     return QueryResponse(
         answer=answer,
         confidence=confidence,
@@ -448,17 +623,15 @@ def health_check():
         and embed_dim == faiss_dim
     )
 
-    return {
-        "status": (
-            "ok"
-            if (
-                faiss_loaded
-                and chunks_loaded
-                and gemini_key_present
-                and embedding_index_dim_match
-            )
-            else "degraded"
-        ),
+    healthy = bool(
+        faiss_loaded
+        and chunks_loaded
+        and gemini_key_present
+        and embedding_index_dim_match
+    )
+
+    body = {
+        "status": "ok" if healthy else "degraded",
         "faiss_loaded": faiss_loaded,
         "chunks_loaded": chunks_loaded,
         "faiss_dim": faiss_dim,
@@ -470,12 +643,32 @@ def health_check():
         "llm_providers": llm_router.status(),
     }
 
+    # A degraded system must say so in the status line, not only in the body —
+    # returning 200 here meant no load balancer or orchestrator could ever act
+    # on the diagnosis this endpoint was built to produce.
+    return JSONResponse(
+        status_code=status.HTTP_200_OK if healthy else status.HTTP_503_SERVICE_UNAVAILABLE,
+        content=body,
+    )
+
+
+@app.get("/metrics")
+def read_metrics():
+    """Aggregate pipeline counters and stage latencies for this process.
+
+    The per-request ``timings`` were previously returned to the caller and
+    then thrown away; these are the same numbers accumulated, so questions
+    like "how often does the verifier fall back" and "what is p95 retrieval"
+    can be answered without replaying logs.
+    """
+    return metrics.snapshot()
+
 
 # --------------------------------------------------------------------
 # ADMIN ENDPOINTS
 # --------------------------------------------------------------------
 
-@app.delete("/admin/cache")
+@app.delete("/admin/cache", dependencies=[Depends(require_admin)])
 def clear_semantic_cache():
     """
     Wipe all entries from the in-memory semantic cache and reset the

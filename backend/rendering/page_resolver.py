@@ -58,7 +58,6 @@ Usage
 from __future__ import annotations
 
 import re
-from typing import Dict, List
 
 # ---------------------------------------------------------------------------
 # Index Drift Offset
@@ -79,9 +78,9 @@ _PAGE_LABEL_RE = re.compile(r"^p\.(\d+)$", re.IGNORECASE)
 
 
 def resolve_page_urls(
-    sources: List[str],
+    sources: list[str],
     base_url: str,
-) -> List[Dict[str, str]]:
+) -> list[dict[str, str]]:
     """
     Convert source page labels into image URL dictionaries.
 
@@ -106,7 +105,7 @@ def resolve_page_urls(
         - ``full_url``      : absolute URL to the full-resolution PNG
     """
     base = base_url.rstrip("/")
-    result: List[Dict[str, str]] = []
+    result: list[dict[str, str]] = []
 
     for label in (sources or []):
         match = _PAGE_LABEL_RE.match((label or "").strip())

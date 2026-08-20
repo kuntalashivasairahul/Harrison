@@ -16,10 +16,10 @@ from __future__ import annotations
 import unittest
 
 from backend.agents.confidence_scorer import (
-    calculate_confidence,
     _HIGH_AVG_SCORE,
     _MED_AVG_SCORE,
     VERIFICATION_PENALTY_THRESHOLD,
+    calculate_confidence,
 )
 
 
@@ -153,6 +153,37 @@ class TestConfidenceTiers(unittest.TestCase):
         result = calculate_confidence(chunks, original, verified)
         self.assertEqual(result, "Medium",
                          "15% verifier edit must not be penalised with new threshold.")
+
+
+class TestUnscoredChunkHandling(unittest.TestCase):
+    """One unscored chunk used to discard every other chunk's score."""
+
+    def test_single_unscored_chunk_among_many_does_not_force_low(self):
+        chunks = [{"chunk_id": i, "score": -0.2} for i in range(11)] + [{"chunk_id": 99}]
+        self.assertEqual(calculate_confidence(chunks, "a", "a"), "Medium")
+
+    def test_unscored_chunks_still_block_high(self):
+        chunks = [{"chunk_id": i, "score": 0.5} for i in range(11)] + [{"chunk_id": 99}]
+        self.assertNotEqual(calculate_confidence(chunks, "a", "a"), "High")
+
+    def test_all_scored_can_still_reach_high(self):
+        chunks = [{"chunk_id": i, "score": 0.5} for i in range(12)]
+        self.assertEqual(calculate_confidence(chunks, "a", "a"), "High")
+
+    def test_half_or_more_unscored_is_low(self):
+        self.assertEqual(
+            calculate_confidence(
+                [{"chunk_id": 1, "score": 0.5}, {"chunk_id": 2}, {"chunk_id": 3}], "a", "a"
+            ),
+            "Low",
+        )
+
+    def test_all_unscored_is_low(self):
+        self.assertEqual(calculate_confidence([{"chunk_id": 1}, {"chunk_id": 2}], "a", "a"), "Low")
+
+    def test_non_numeric_score_counts_as_unusable_not_as_a_crash(self):
+        chunks = [{"chunk_id": i, "score": -0.2} for i in range(11)] + [{"chunk_id": 9, "score": "oops"}]
+        self.assertEqual(calculate_confidence(chunks, "a", "a"), "Medium")
 
 
 if __name__ == "__main__":

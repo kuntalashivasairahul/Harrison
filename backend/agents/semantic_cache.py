@@ -64,7 +64,6 @@ import json
 import logging
 import threading
 from pathlib import Path
-from typing import Dict, List, Optional
 
 import numpy as np
 
@@ -93,7 +92,7 @@ _CACHE_FILE   = _CACHE_DIR / "semantic_cache.json"
 # Cosine similarity helper
 # ---------------------------------------------------------------------------
 
-def _cosine_similarity(a: List[float], b: List[float]) -> float:
+def _cosine_similarity(a: list[float], b: list[float]) -> float:
     """
     Compute the cosine similarity between two equal-length float lists.
 
@@ -150,7 +149,7 @@ class SemanticCache:
     """
 
     def __init__(self) -> None:
-        self._entries: List[Dict] = []
+        self._entries: list[dict] = []
         self._lock = threading.Lock()
         self._load_from_disk()
 
@@ -217,8 +216,12 @@ class SemanticCache:
         """
         try:
             tmp_path = _CACHE_FILE.with_suffix(".tmp")
+            # No indent: each entry carries a 1024-float embedding, and
+            # pretty-printing puts every float on its own line — that alone
+            # took the file from ~4 MB to ~14.6 MB at MAX_CACHE_ENTRIES, all
+            # of it rewritten on every save inside the request path.
             tmp_path.write_text(
-                json.dumps(self._entries, ensure_ascii=False, indent=2),
+                json.dumps(self._entries, ensure_ascii=False, separators=(",", ":")),
                 encoding="utf-8",
             )
             tmp_path.replace(_CACHE_FILE)  # atomic on POSIX; near-atomic on Windows
@@ -230,7 +233,7 @@ class SemanticCache:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _metadata_matches(entry: Dict, metadata: Optional[Dict]) -> bool:
+    def _metadata_matches(entry: dict, metadata: dict | None) -> bool:
         """Return True when ``entry`` is eligible for a request signature."""
         if metadata is None:
             return True
@@ -238,9 +241,9 @@ class SemanticCache:
 
     def check_cache(
         self,
-        query_embedding: List[float],
-        metadata: Optional[Dict] = None,
-    ) -> Optional[Dict]:
+        query_embedding: list[float],
+        metadata: dict | None = None,
+    ) -> dict | None:
         """
         Search for a cached response whose embedding is semantically similar
         to ``query_embedding``.
@@ -265,26 +268,42 @@ class SemanticCache:
             return None
 
         best_sim: float = -1.0
-        best_response: Optional[Dict] = None
+        best_response: dict | None = None
         best_idx: int = -1
 
-        for idx, entry in enumerate(self._entries):
-            if not self._metadata_matches(entry, metadata):
-                continue
-            stored_emb = entry.get("embedding")
-            if not stored_emb:
-                continue
-            if len(stored_emb) != len(query_embedding):
-                continue
-            try:
-                sim = _cosine_similarity(query_embedding, stored_emb)
-            except Exception:
-                continue
+        # Score every eligible entry in one matmul.  The previous loop called
+        # _cosine_similarity() per entry, and each call rebuilt a NumPy array
+        # from the *query* list — 1024 floats converted once per stored entry
+        # instead of once per request.
+        try:
+            dim = len(query_embedding)
+            eligible = [
+                (idx, entry)
+                for idx, entry in enumerate(self._entries)
+                if self._metadata_matches(entry, metadata)
+                and isinstance(entry.get("embedding"), list)
+                and len(entry["embedding"]) == dim
+            ]
+            if not eligible:
+                log.debug("SemanticCache: MISS (no entry matches the request signature)")
+                return None
 
-            if sim > best_sim:
-                best_sim = sim
-                best_response = entry.get("response")
-                best_idx = idx
+            query_vec = np.asarray(query_embedding, dtype=np.float32)
+            matrix = np.asarray([entry["embedding"] for _, entry in eligible], dtype=np.float32)
+
+            query_norm = float(np.linalg.norm(query_vec))
+            row_norms = np.linalg.norm(matrix, axis=1)
+            denom = row_norms * query_norm
+            with np.errstate(divide="ignore", invalid="ignore"):
+                sims = np.where(denom > 0, matrix @ query_vec / denom, 0.0)
+
+            best_row = int(np.argmax(sims))
+            best_sim = float(sims[best_row])
+            best_idx = eligible[best_row][0]
+            best_response = eligible[best_row][1].get("response")
+        except Exception as exc:
+            log.warning("SemanticCache: similarity scan failed (%s) — treating as MISS.", exc)
+            return None
 
         if best_sim >= SIMILARITY_THRESHOLD and best_response is not None:
             log.info(
@@ -312,10 +331,10 @@ class SemanticCache:
 
     def save_to_cache(
         self,
-        query_embedding: List[float],
-        response_data: Dict,
-        metadata: Optional[Dict] = None,
-        audit_data: Optional[Dict] = None,
+        query_embedding: list[float],
+        response_data: dict,
+        metadata: dict | None = None,
+        audit_data: dict | None = None,
     ) -> None:
         """
         Persist a new cache entry to memory and disk.
@@ -338,14 +357,17 @@ class SemanticCache:
             return
 
         try:
-            new_entry: Dict = {
+            new_entry: dict = {
                 "embedding": query_embedding,
                 "metadata": metadata or {},
+                # visual_context is intentionally NOT stored: it contains
+                # absolute URLs built from the requesting host, and a cached
+                # entry served behind a different host would hand back links
+                # to the old one.  Callers rebuild it from "sources".
                 "response": {
-                    "answer":         response_data.get("answer", ""),
-                    "confidence":     response_data.get("confidence", "Low"),
-                    "sources":        response_data.get("sources", []),
-                    "visual_context": response_data.get("visual_context", []),
+                    "answer":     response_data.get("answer", ""),
+                    "confidence": response_data.get("confidence", "Low"),
+                    "sources":    response_data.get("sources", []),
                 },
                 "audit": audit_data or {},
                 "hits": 0,

@@ -1,8 +1,8 @@
-from typing import Dict, List
+
 from backend.utils.fusion import clean_text
 
 
-def extract_evidence(chunks: List[Dict]) -> List[str]:
+def extract_evidence(chunks: list[dict]) -> list[str]:
     """
     Convert retrieved chunks into page-cited evidence statements for the LLM.
 
@@ -20,7 +20,7 @@ def extract_evidence(chunks: List[Dict]) -> List[str]:
 
     MAX_WORDS = 400   # ~2 400 chars per chunk; generous but bounded
 
-    evidence: List[str] = []
+    evidence: list[str] = []
 
     if not chunks:
         return evidence
@@ -57,7 +57,7 @@ def extract_evidence(chunks: List[Dict]) -> List[str]:
 
 
 
-def extract_sources(chunks: List[Dict]) -> List[str]:
+def extract_sources(chunks: list[dict]) -> list[str]:
     """
     Return a de-duplicated, sorted list of human-readable page references from
     the retrieved chunks.
