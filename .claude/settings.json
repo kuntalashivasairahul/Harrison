@@ -1,0 +1,32 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(.venv312/bin/python -m pytest:*)",
+      "Bash(.venv312/bin/python -m ruff:*)",
+      "Bash(.venv312/bin/python -c:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git show:*)",
+      "Bash(rg:*)",
+      "Bash(grep:*)",
+      "Bash(find:*)",
+      "Bash(ls:*)",
+      "Bash(wc:*)"
+    ],
+    "deny": [
+      "Read(./backend/.env)",
+      "Read(./artifacts/vectorstore/**)",
+      "Read(./artifacts/vectorstore_backup/**)",
+      "Read(./artifacts/retrieval_logs/**)",
+      "Read(./storage/pages/**)",
+      "Read(./data/harrison.md)",
+      "Read(./data/harrison.pdf)",
+      "Bash(git push --force:*)",
+      "Bash(git reset --hard:*)"
+    ]
+  },
+  "env": {
+    "HARRISON_LOG_LEVEL": "INFO"
+  }
+}

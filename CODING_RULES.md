@@ -260,6 +260,25 @@ After any change to `calculate_confidence()` or `rerank.py`, verify that:
 - A query with no FAISS index loaded returns `confidence: "Low"`.
 - A query returning `REFUSAL_STR` has `was_verified=False` in logs.
 
+### 5.2a Hermetic Test Suite
+
+The suite in `tests/` **must** stay hermetic: no network calls, no model
+weights, no FAISS index. That is why it runs in seconds and why CI needs no
+credentials.
+
+```
+❌ FORBIDDEN: A test in tests/ that loads the real index or calls a live model.
+❌ FORBIDDEN: Mutating sys.modules without restoring it — one test that did
+              silently replaced the Google SDK for every test collected after it.
+❌ FORBIDDEN: Naming a program in scripts/ `test_*.py`. Those are interactive
+              diagnostics that load real models; pytest must not collect them.
+              They are named `probe_*.py`.
+✅ REQUIRED:  Use tests/_api_harness.py to import the HTTP layer cheaply.
+```
+
+Integration coverage against the real index and a live model is a separate tier
+that does not exist yet. It is the main outstanding gap in this repository.
+
 ### 5.3 Health Check Gate
 
 The `/health` endpoint must return `"status": "ok"` before any change is
@@ -280,6 +299,33 @@ precision metrics.
 
 ---
 
+## RULE 5a — Import-Time Purity
+
+No module under `backend/` may perform expensive or networked work at import
+time.
+
+```
+❌ FORBIDDEN: Loading the FAISS index, chunk registry, BM25 corpus, or an
+              encoder at module scope.
+❌ FORBIDDEN: Any network call at import — model discovery included.
+❌ FORBIDDEN: logging.getLogger("uvicorn.error") in a backend module. Uvicorn
+              leaves root bare at WARNING, so backend.* INFO logs were being
+              discarded; two modules had worked around it locally, which fixed
+              those call sites and hid the cause.
+✅ REQUIRED:  Resolve on first use; force it deliberately in the FastAPI
+              lifespan handler.
+✅ REQUIRED:  Call configure_logging() before any other backend.* import in an
+              entry point, so import-time diagnostics are captured.
+✅ REQUIRED:  Module loggers via logging.getLogger(__name__).
+```
+
+Rationale: import-time work is paid by every test run, every diagnostic script,
+and every tool that merely wants a helper function — and a network call at
+import makes the app's startup depend on a third party before `/health` can
+answer.
+
+---
+
 ## RULE 6 — Dependency Governance
 
 ### 6.1 Approved Dependencies
@@ -289,13 +335,41 @@ The following are the **only** approved runtime dependencies:
 ```
 fastapi
 uvicorn
+pydantic         ← FastAPI's schema layer; pinned because QueryResponse is a frozen contract
 faiss-cpu
 sentence-transformers
+torch            ← required by sentence-transformers; pinned, not newly introduced
+transformers     ← required by sentence-transformers; pinned, not newly introduced
 numpy
 google-genai
+groq             ← Stage 1 query optimizer only; never draft or verification
 python-dotenv
 rank-bm25
 PyMuPDF          ← for pre-processing page renders (offline only)
+```
+
+**On the pinned transitive dependencies.** `pydantic`, `torch` and
+`transformers` are not new capabilities — they were always installed as
+transitive dependencies of `fastapi` and `sentence-transformers`. They are now
+named and version-pinned in `backend/requirements.txt` because leaving them
+floating meant a fresh install resolved a different `transformers`/`torch` pair
+with no guarantee of reproducing the same embeddings against the committed
+FAISS index. Pinning a dependency you already had is a reproducibility control,
+not a new dependency; adding a genuinely new package still requires §6.2.
+
+`groq` predates this list and serves the optimizer stage only, per the Stage 1
+provider policy in `README.md`. It is recorded here so the list matches
+`backend/requirements.txt`.
+
+### 6.1a Development Dependencies
+
+`backend/requirements-dev.txt` carries test and lint tooling. These are not
+runtime dependencies and must never be imported by anything under `backend/`:
+
+```
+pytest
+httpx            ← required by fastapi.testclient
+ruff
 ```
 
 ### 6.2 Adding a New Dependency
@@ -333,4 +407,4 @@ Adding any new dependency requires:
 
 ---
 
-*Last updated: 2026-05-30 | Maintainer: HarrisonGPT AI Governance*
+*Last updated: 2026-08-21 | Maintainer: HarrisonGPT AI Governance*
