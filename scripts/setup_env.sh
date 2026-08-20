@@ -24,6 +24,14 @@ else
     echo "Using existing Python 3.12: $PYTHON_EXE"
 fi
 
+if ! command -v git-lfs >/dev/null 2>&1; then
+    echo "WARNING: git-lfs is not installed."
+    echo "  artifacts/vectorstore/* are LFS-tracked; without git-lfs they are"
+    echo "  pointer files and the API will start degraded."
+    echo "  Install with: brew install git-lfs && git lfs install"
+    echo
+fi
+
 echo "=== Creating virtual environment .venv312 ==="
 if [ -d ".venv312" ]; then
     echo "Virtual environment .venv312 already exists."
@@ -35,6 +43,9 @@ fi
 echo "=== Upgrading pip and installing requirements ==="
 .venv312/bin/python -m pip install --upgrade pip
 .venv312/bin/python -m pip install -r backend/requirements.txt
+
+echo "=== Installing development / test dependencies ==="
+.venv312/bin/python -m pip install -r backend/requirements-dev.txt
 
 echo "=== Environment Setup Complete! ==="
 .venv312/bin/python --version

@@ -22,4 +22,7 @@ if (-not (Test-Path ".venv312")) {
 
 & .venv312\Scripts\python.exe -m pip install --upgrade pip
 & .venv312\Scripts\python.exe -m pip install -r backend\requirements.txt
+
+Write-Host "=== Installing development / test dependencies ==="
+& .venv312\Scripts\python.exe -m pip install -r backend\requirements-dev.txt
 & .venv312\Scripts\python.exe --version

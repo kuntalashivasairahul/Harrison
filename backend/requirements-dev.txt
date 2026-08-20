@@ -1,0 +1,12 @@
+# Development and test dependencies for the documented runtime (.venv312).
+#
+#   ./scripts/setup_env.sh
+#   .venv312/bin/pip install -r backend/requirements-dev.txt
+#   .venv312/bin/python -m pytest
+#
+# The suite is hermetic: no network, no model weights, no FAISS index.
+-r requirements.txt
+
+pytest==9.1.1
+httpx==0.28.1          # required by fastapi.testclient
+ruff==0.16.3

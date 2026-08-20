@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-scripts/test_retrieval.py
+scripts/probe_retrieval.py
 =========================
 Standalone diagnostic script for the HarrisonGPT retrieval pipeline.
 
@@ -20,9 +20,10 @@ What it does
 
 Usage
 -----
-    python scripts/test_retrieval.py
-    python scripts/test_retrieval.py --query "Ranson criteria pancreatitis" --k 50
-    python scripts/test_retrieval.py --search-term "Glasgow" --no-rerank
+    python scripts/probe_retrieval.py
+    python scripts/probe_retrieval.py --staging
+    python scripts/probe_retrieval.py --query "Ranson criteria pancreatitis" --k 50
+    python scripts/probe_retrieval.py --search-term "Glasgow" --no-rerank
 
 Flags
 -----
@@ -66,8 +67,27 @@ from backend.config import (
     RRF_K,
 )
 
-CHUNKS_PATH  = _ROOT / "artifacts" / "vectorstore" / "chunks.json"
-INDEX_PATH   = _ROOT / "artifacts" / "vectorstore" / "index.faiss"
+# Production and staging differ only in where the index lives, so one script
+# with a --staging flag replaces the two 515-line near-copies this used to be
+# (probe_retrieval.py and probe_retrieval_staging.py differed in two lines).
+_VECTORSTORES = {
+    "production": ("vectorstore", "chunks.json", "index.faiss"),
+    "staging":    ("vectorstore_staging", "table_chunks.json", "table_index.faiss"),
+}
+
+# Rebound by main() when --staging is passed.
+VECTORSTORE = "production"
+CHUNKS_PATH = _ROOT / "artifacts" / "vectorstore" / "chunks.json"
+INDEX_PATH  = _ROOT / "artifacts" / "vectorstore" / "index.faiss"
+
+
+def select_vectorstore(name: str) -> None:
+    """Point CHUNKS_PATH / INDEX_PATH at the production or staging store."""
+    global VECTORSTORE, CHUNKS_PATH, INDEX_PATH
+    directory, chunks_file, index_file = _VECTORSTORES[name]
+    VECTORSTORE = name
+    CHUNKS_PATH = _ROOT / "artifacts" / directory / chunks_file
+    INDEX_PATH = _ROOT / "artifacts" / directory / index_file
 
 # ---------------------------------------------------------------------------
 # Pipeline constants — must match rag.py exactly
@@ -402,6 +422,8 @@ def parse_args() -> argparse.Namespace:
                    help="String to brute-force scan the corpus for")
     p.add_argument("--no-rerank",   action="store_true",
                    help="Skip Cross-Encoder reranking (faster)")
+    p.add_argument("--staging",     action="store_true",
+                   help="Probe artifacts/vectorstore_staging/ instead of production")
     p.add_argument("--device",      default=None,
                    help="Embedding device: mps | cpu (default: auto)")
     return p.parse_args()
@@ -409,6 +431,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    select_vectorstore("staging" if args.staging else "production")
+    print(f"Vectorstore: {VECTORSTORE}  ({CHUNKS_PATH.parent})")
 
     # ── Device ───────────────────────────────────────────────────────────
     device = args.device or ("mps" if torch.backends.mps.is_available() else "cpu")

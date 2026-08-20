@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-scripts/test_environment.py
+scripts/probe_environment.py
 ===========================
 Verification script to verify each dependency in isolation.
 Enforces OMP_NUM_THREADS=1 to prevent native macOS threading crashes.

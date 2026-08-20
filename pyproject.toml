@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "harrisongpt"
+version = "0.1.0"
+description = "Medical RAG system grounded in Harrison's Principles of Internal Medicine"
+requires-python = ">=3.12"
+
+[tool.setuptools]
+packages = ["backend"]
+
+# ---------------------------------------------------------------------------
+# pytest
+# ---------------------------------------------------------------------------
+# testpaths matters: scripts/ contains diagnostic programs, several of which
+# used to be named test_*.py.  Without this, a bare `pytest` collected them,
+# and one loads BGE-M3 and calls .encode() at module scope — collection died
+# inside torch before a single real test ran.  Those files are now probe_*.py,
+# and this pins collection to tests/ regardless.
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-q --strict-markers"
+filterwarnings = [
+    "ignore::DeprecationWarning:google.*",
+]
+
+# ---------------------------------------------------------------------------
+# ruff
+# ---------------------------------------------------------------------------
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+exclude = [".venv", ".venv312", "artifacts", "storage", "data"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = [
+    "E501",   # long lines are pervasive in the prompt strings; line-length above is advisory
+    "B008",   # FastAPI Depends() in defaults is idiomatic
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E402", "F841", "B905"]
+# Logging must be configured before backend imports.
+"backend/api/main.py" = ["E402"]
+# load_dotenv() must run before backend.llm is imported so the key pool sees
+# the environment.
+"backend/agents/query_optimizer.py" = ["E402"]
+# str+Enum is deliberate: these values are serialised into logs and JSON, and
+# StrEnum is not a drop-in (it changes __str__ for existing consumers).
+"backend/llm/contracts.py" = ["UP042"]
