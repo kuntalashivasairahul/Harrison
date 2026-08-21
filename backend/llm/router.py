@@ -14,6 +14,7 @@ from pathlib import Path
 from backend.config import LLM_PROVIDER_COOLDOWN_SECONDS
 from backend.llm.contracts import LLMError, LLMErrorCategory, LLMRequest, LLMResult, LLMStage
 from backend.llm.groq_provider import GroqProvider
+from backend.llm.mistral_provider import MistralProvider
 
 log = logging.getLogger(__name__)
 
@@ -26,6 +27,16 @@ FALLBACK_ELIGIBLE = frozenset({
     LLMErrorCategory.NOT_FOUND,
 })
 _REGISTRY_PATH = Path(__file__).with_name("model_registry.json")
+
+#: Providers that stay dark unless the operator opts in *and* a key is present.
+#: Gemini is deliberately absent: it is the baseline, not an opt-in.
+_OPT_IN_PROVIDER_FLAGS = {"groq": "GROQ_ENABLED", "mistral": "MISTRAL_ENABLED"}
+
+#: Providers with an adapter behind them. A registry entry naming anything else
+#: is rejected at load rather than dispatched: _adapter() resolves unknown names
+#: to Gemini, so a typo'd or unapproved provider would otherwise send Harrison's
+#: context to Gemini while the logs and the registry both claimed otherwise.
+_KNOWN_PROVIDERS = frozenset({"gemini", "groq", "mistral"})
 
 
 @dataclass(frozen=True)
@@ -51,6 +62,8 @@ def load_registry(path: Path = _REGISTRY_PATH) -> dict[str, Deployment]:
         required = {"alias", "provider", "model", "enabled", "stages", "max_input_tokens", "max_output_tokens", "timeout_seconds", "privacy", "priority"}
         if set(item) != required or item["alias"] in deployments:
             raise ValueError("Invalid or duplicate LLM deployment registry entry.")
+        if item["provider"] not in _KNOWN_PROVIDERS:
+            raise ValueError(f"Unapproved LLM provider {item['provider']!r} for {item['alias']}.")
         stages = tuple(LLMStage(value) for value in item["stages"])
         if item["max_input_tokens"] <= 0 or item["max_output_tokens"] <= 0 or item["timeout_seconds"] <= 0:
             raise ValueError(f"Invalid capability limits for {item['alias']}.")
@@ -67,6 +80,7 @@ class LLMRouter:
                  draft_fallback_model: str | None = None) -> None:
         self._gemini_provider = gemini_provider
         self._groq_provider = GroqProvider()
+        self._mistral_provider = MistralProvider()
         self._prod_model = prod_model
         self._backup_model = backup_model
         self._draft_fallback_model = draft_fallback_model or backup_model
@@ -86,12 +100,22 @@ class LLMRouter:
         with self._lock:
             return self._cooldowns.get(alias, 0.0) > time.monotonic()
 
+    def _adapter(self, provider: str):
+        return {
+            "groq": self._groq_provider,
+            "mistral": self._mistral_provider,
+        }.get(provider, self._gemini_provider)
+
     def _enabled(self, deployment: Deployment) -> bool:
         if not deployment.enabled or self._cooling_down(deployment.alias):
             return False
-        if deployment.provider == "groq":
-            return os.getenv("GROQ_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"} and self._groq_provider.configured
-        return True
+        flag = _OPT_IN_PROVIDER_FLAGS.get(deployment.provider)
+        if flag is None:
+            return True
+        return (
+            os.getenv(flag, "false").strip().lower() in {"1", "true", "yes", "on"}
+            and self._adapter(deployment.provider).configured
+        )
 
     def deployments_for(self, stage: LLMStage) -> list[Deployment]:
         return sorted(
@@ -114,6 +138,8 @@ class LLMRouter:
             return self._value(self._draft_fallback_model)
         if deployment.alias == "groq-optimizer":
             return os.getenv("GROQ_OPTIMIZER_MODEL", deployment.model).strip() or deployment.model
+        if deployment.alias == "mistral-draft":
+            return os.getenv("MISTRAL_DRAFT_MODEL", deployment.model).strip() or deployment.model
         return deployment.model
 
     def _cooldown(self, deployment: Deployment, error: LLMError) -> None:
@@ -129,8 +155,14 @@ class LLMRouter:
     def generate(self, request: LLMRequest, deployment: Deployment, model_override: str | None = None) -> LLMResult:
         model = model_override or self._resolve_model(deployment)
         if len(request.prompt) > deployment.max_input_tokens * 4:
+            # UNAVAILABLE, not INVALID_REQUEST: the prompt is fine, this one
+            # deployment is simply too small for it.  As INVALID_REQUEST it was
+            # not fallback-eligible, so a small deployment early in the priority
+            # order aborted the whole stage instead of deferring to a larger one
+            # behind it — which is exactly the shape of the draft stage now that
+            # groq-draft is capped at Groq's 8k-token-per-minute free tier.
             raise LLMError(
-                LLMErrorCategory.INVALID_REQUEST,
+                LLMErrorCategory.UNAVAILABLE,
                 f"Prompt exceeds configured input capacity for {deployment.alias}.",
                 provider=deployment.provider,
             )
@@ -156,15 +188,25 @@ class LLMRouter:
             stage=request.stage,
         )
         try:
-            provider = self._gemini_provider if deployment.provider == "gemini" else self._groq_provider
-            result = provider.generate(bounded, model)
+            result = self._adapter(deployment.provider).generate(bounded, model)
             log.info("llm_route: stage=%s provider=%s deployment=%s model=%s latency=%.3fs finish_reason=%s", bounded.stage.value, result.provider, deployment.alias, result.model, result.latency_seconds, result.finish_reason)
             return result
         except LLMError as error:
             self._cooldown(deployment, error)
             with self._lock:
                 self._last_errors[deployment.alias] = error.category.value
-            log.warning("llm_route: stage=%s provider=%s deployment=%s error=%s fallback_eligible=%s", bounded.stage.value, deployment.provider, deployment.alias, error.category.value, error.category in FALLBACK_ELIGIBLE)
+            # The provider message is the only place the quota *metric* appears
+            # ("...PerDay..." vs "...PerMinute..."), and without it a 429 that
+            # clears in a minute is indistinguishable in the logs from one that
+            # clears at midnight Pacific. Log the model too, so a failing
+            # (key, model) pair can be read straight off the line above it.
+            log.warning(
+                "llm_route: stage=%s provider=%s deployment=%s model=%s error=%s "
+                "fallback_eligible=%s detail=%s",
+                bounded.stage.value, deployment.provider, deployment.alias, model,
+                error.category.value, error.category in FALLBACK_ELIGIBLE,
+                str(error)[:400].replace("\n", " "),
+            )
             raise
 
     def generate_named(self, request: LLMRequest, alias: str, model_override: str | None = None) -> LLMResult:

@@ -349,7 +349,8 @@ torch            ← required by sentence-transformers; pinned, not newly introd
 transformers     ← required by sentence-transformers; pinned, not newly introduced
 numpy
 google-genai
-groq             ← Stage 1 query optimizer only; never draft or verification
+groq             ← query optimizer, and draft failover of last resort; never verification
+                   (Mistral is also an approved draft provider — stdlib urllib, no package)
 python-dotenv
 rank-bm25
 PyMuPDF          ← for pre-processing page renders (offline only)
@@ -364,9 +365,31 @@ with no guarantee of reproducing the same embeddings against the committed
 FAISS index. Pinning a dependency you already had is a reproducibility control,
 not a new dependency; adding a genuinely new package still requires §6.2.
 
-`groq` predates this list and serves the optimizer stage only, per the Stage 1
-provider policy in `README.md`. It is recorded here so the list matches
-`backend/requirements.txt`.
+`groq` predates this list. It serves the optimizer stage, and the `groq-draft`
+deployment serves the draft stage at priority 30 — reached only after both
+Gemini draft deployments have failed with a fallback-eligible error. The
+original "never draft" restriction was written when Groq meant an 8B optimizer
+model; it now serves 120B-class models, and a Groq draft is still verified by
+Gemini against the same context, so `verify_answer()` and the citation checks
+are not weakened. **Groq must never serve the verifier stage** — that would
+leave no independent check on a Groq draft. See the provider policy in
+`README.md`.
+
+**Mistral is an approved draft provider and adds no dependency.** The
+`mistral-draft` deployment (priority 25) is served by
+`backend/llm/mistral_provider.py`, which posts to Mistral's chat-completions
+endpoint using `urllib` from the standard library. The `mistralai` SDK would
+need a §6.2 justification to buy one JSON POST, and `httpx` is a *development*
+dependency that §6.1a forbids importing from `backend/` — so neither is used.
+Nothing was added to `backend/requirements.txt` for this provider, and there is
+nothing to pin.
+
+The verifier restriction is not Groq-specific and must not be read that way:
+**Gemini is the only approved verifier.** Any provider added to the draft stage
+inherits the same bargain — it may write a first pass, and Gemini decides
+whether that pass survives. `tests/test_llm_router.py` asserts this against the
+registry for every non-Gemini deployment, so a future entry cannot quietly
+acquire the verifier stage.
 
 ### 6.1a Development Dependencies
 

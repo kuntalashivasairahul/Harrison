@@ -31,3 +31,11 @@ LLM_OPTIMIZER_DEADLINE_SECONDS = float(os.getenv("LLM_OPTIMIZER_DEADLINE_SECONDS
 LLM_DRAFT_DEADLINE_SECONDS = float(os.getenv("LLM_DRAFT_DEADLINE_SECONDS", "60"))
 LLM_VERIFIER_DEADLINE_SECONDS = float(os.getenv("LLM_VERIFIER_DEADLINE_SECONDS", "60"))
 LLM_PROVIDER_COOLDOWN_SECONDS = float(os.getenv("LLM_PROVIDER_COOLDOWN_SECONDS", "60"))
+
+# Wall-clock ceiling for one /ask request.  The per-stage deadlines above are
+# independent and each stage retries, so without this a single request could
+# legitimately run for minutes.  Stage deadlines clamp against what is left of
+# this budget; retries stop when it is spent.  Set to 0 to disable.
+LLM_TOTAL_REQUEST_BUDGET_SECONDS = float(
+    os.getenv("LLM_TOTAL_REQUEST_BUDGET_SECONDS", "90")
+)

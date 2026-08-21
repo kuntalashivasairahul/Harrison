@@ -60,8 +60,15 @@ class LLMError(RuntimeError):
         *,
         retry_after_seconds: float | None = None,
         provider: str | None = None,
+        model: str | None = None,
     ) -> None:
         super().__init__(message)
         self.category = category
         self.retry_after_seconds = retry_after_seconds
         self.provider = provider
+        #: The model that produced this failure. Gemini quota cooldowns are
+        #: scoped per (key, model), and KeyManager otherwise has to infer the
+        #: model from the last next_client() call — which is process-global, so
+        #: a concurrent request on another model can win the race and get the
+        #: cooldown recorded against it instead.
+        self.model = model

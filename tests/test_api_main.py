@@ -84,7 +84,7 @@ class TestShouldSaveToCache(unittest.TestCase):
         )
 
     def test_unverified_paths_are_not_cached(self):
-        for path in ("draft_fallback", "graceful_fallback", "error_fallback"):
+        for path in ("draft_fallback", "graceful_fallback", "no_grounding", "provider_failure"):
             self.assertFalse(
                 main._should_save_to_cache(
                     disable_verifier=False, returned_path=path, was_truncated=False
@@ -161,6 +161,55 @@ class TestAskEndpoint(_ApiTestCase):
         retrieve.assert_not_called()
         ask_llm.assert_not_called()
 
+    def test_cache_hit_does_not_call_the_optimizer(self):
+        """The cache used to sit behind optimize_query(), so every hit paid a
+        full Groq round-trip (~700ms) to look up an answer it already had."""
+        self._cache.check_cache.return_value = {
+            "answer": "cached answer",
+            "confidence": "High",
+            "sources": ["p.142"],
+        }
+        with patch.object(main, "optimize_query") as optimize:
+            response = self.client.post("/ask", json={"query": "acute pancreatitis"})
+
+        self.assertEqual(response.json()["answer"], "cached answer")
+        optimize.assert_not_called()
+
+    def test_cache_is_probed_for_every_final_k_the_optimizer_could_pick(self):
+        """complexity is the only signature field the optimizer decides, so
+        both of its possible final_k values must be probed before it runs."""
+        self._cache.check_cache.return_value = None
+        with patch.object(main, "optimize_query", return_value=_optimized()), \
+             patch.object(main, "retrieve", return_value=[]), \
+             patch.object(main, "ask_llm", return_value=("a", "a", False, "verified")):
+            self.client.post("/ask", json={"query": "acute pancreatitis", "mode": "qa"})
+
+        probed = {call.kwargs["metadata"]["final_k"]
+                  for call in self._cache.check_cache.call_args_list}
+        self.assertEqual(probed, {5, 12})
+
+    def test_the_cache_key_is_the_raw_query_not_the_expanded_one(self):
+        """Keying on the expansion makes the key unobtainable without the LLM
+        call the cache exists to avoid."""
+        with patch.object(main, "embed_text") as embed, \
+             patch.object(main, "optimize_query", return_value=_optimized()):
+            embed.return_value.flatten.return_value.tolist.return_value = [0.1] * 4
+            self._cache.check_cache.return_value = {
+                "answer": "cached", "confidence": "High", "sources": [],
+            }
+            self.client.post("/ask", json={"query": "acute pancreatitis"})
+
+        embed.assert_called_once_with("acute pancreatitis")
+
+    def test_the_request_opens_a_wall_clock_budget(self):
+        """Without this wiring the stage clamps in llm.py never engage."""
+        with patch.object(main, "start_request_budget") as budget, \
+             patch.object(main, "optimize_query", return_value=_optimized(is_medical_query=False)):
+            self.client.post("/ask", json={"query": "acute pancreatitis"})
+
+        budget.assert_called_once_with(main.LLM_TOTAL_REQUEST_BUDGET_SECONDS)
+        self.assertGreater(main.LLM_TOTAL_REQUEST_BUDGET_SECONDS, 0)
+
     def test_response_matches_the_frozen_contract(self):
         with patch.object(main, "optimize_query", return_value=_optimized()), \
              patch.object(main, "retrieve", return_value=[{"chunk_id": 1, "page": 142, "text": "t", "score": 0.5}]), \
@@ -222,7 +271,8 @@ class TestConfidenceCaps(_ApiTestCase):
 
     def test_total_failure_paths_are_forced_low(self):
         self.assertEqual(self._ask("graceful_fallback", False), "Low")
-        self.assertEqual(self._ask("error_fallback", True), "Low")
+        self.assertEqual(self._ask("no_grounding", False), "Low")
+        self.assertEqual(self._ask("provider_failure", True), "Low")
 
     def test_caps_never_upgrade_a_low_score(self):
         self.assertEqual(self._ask("verified", False, scored="Low"), "Low")

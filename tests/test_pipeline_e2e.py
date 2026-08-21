@@ -72,20 +72,20 @@ class TestAskLlm4TupleConsistency(unittest.TestCase):
             return ask_llm(fused_context=fused_context, question="test", **kwargs)
 
     def test_early_exit_empty_context_returns_4_tuple(self):
-        """Empty context → 4-tuple with error_fallback path."""
+        """Empty context → 4-tuple with no_grounding path."""
         result = self._call_ask_llm(fused_context="")
         self.assertEqual(len(result), 4,
                          "ask_llm must return exactly 4 values on empty context")
         _, _, _, returned_path = result
-        self.assertEqual(returned_path, "error_fallback")
+        self.assertEqual(returned_path, "no_grounding")
 
     def test_early_exit_short_context_returns_4_tuple(self):
-        """Context < 20 chars → 4-tuple with error_fallback path."""
+        """Context < 20 chars → 4-tuple with no_grounding path."""
         result = self._call_ask_llm(fused_context="tiny")
         self.assertEqual(len(result), 4,
                          "ask_llm must return exactly 4 values on short context")
         _, _, _, returned_path = result
-        self.assertEqual(returned_path, "error_fallback")
+        self.assertEqual(returned_path, "no_grounding")
 
     def test_empty_generation_returns_4_tuple(self):
         """Draft generation returns empty text → 4-tuple."""
@@ -99,10 +99,10 @@ class TestAskLlm4TupleConsistency(unittest.TestCase):
             result = ask_llm(fused_context="A" * 100, question="test")
         self.assertEqual(len(result), 4)
         _, _, _, returned_path = result
-        self.assertEqual(returned_path, "error_fallback")
+        self.assertEqual(returned_path, "provider_failure")
 
     def test_all_retries_fail_returns_4_tuple(self):
-        """All LLM retries exhaust → 4-tuple with error_fallback."""
+        """All LLM retries exhaust → 4-tuple with provider_failure."""
         with patch("backend.llm.llm.key_manager") as mock_km, \
              patch("backend.llm.llm.types") as mock_types, \
              patch("backend.llm.llm.DRAFT_MAX_ATTEMPTS", 1):
@@ -114,7 +114,7 @@ class TestAskLlm4TupleConsistency(unittest.TestCase):
             result = ask_llm(fused_context="A" * 100, question="test")
         self.assertEqual(len(result), 4)
         answer, _, _, returned_path = result
-        self.assertEqual(returned_path, "error_fallback")
+        self.assertEqual(returned_path, "provider_failure")
         # Must NOT contain raw exception text
         self.assertNotIn("test error", answer)
         self.assertNotIn("LLM call failed", answer)
@@ -149,13 +149,13 @@ class TestAskLlm4TupleConsistency(unittest.TestCase):
 
 
 # -----------------------------------------------------------------------
-# Test: error_fallback safety
+# Test: provider_failure safety
 # -----------------------------------------------------------------------
 
 class TestErrorFallbackSafety(unittest.TestCase):
     """Error fallback must never expose raw provider errors."""
 
-    def test_error_fallback_answer_is_user_safe(self):
+    def test_provider_failure_answer_is_user_safe(self):
         with patch("backend.llm.llm.key_manager") as mock_km, \
              patch("backend.llm.llm.types") as mock_types, \
              patch("backend.llm.llm.DRAFT_MAX_ATTEMPTS", 1):
@@ -167,7 +167,7 @@ class TestErrorFallbackSafety(unittest.TestCase):
             mock_types.GenerateContentConfig.side_effect = _FakeConfig
             from backend.llm.llm import ask_llm
             answer, _, _, path = ask_llm(fused_context="A" * 100, question="test")
-        self.assertEqual(path, "error_fallback")
+        self.assertEqual(path, "provider_failure")
         self.assertNotIn("429", answer)
         self.assertNotIn("RESOURCE_EXHAUSTED", answer)
         self.assertNotIn("Quota", answer)
@@ -352,7 +352,7 @@ class TestConfidenceCaps(unittest.TestCase):
     def _compute_capped_confidence(self, raw_confidence, returned_path, was_truncated):
         """Apply the same cap logic as main.py."""
         confidence = raw_confidence
-        if returned_path in ("graceful_fallback", "error_fallback"):
+        if returned_path in ("graceful_fallback", "no_grounding", "provider_failure"):
             confidence = "Low"
         elif returned_path in ("draft_fallback", "partial_verified") and confidence == "High":
             confidence = "Medium"
@@ -396,15 +396,21 @@ class TestConfidenceCaps(unittest.TestCase):
             "Low"
         )
 
-    def test_error_fallback_always_low(self):
+    def test_provider_failure_always_low(self):
         self.assertEqual(
-            self._compute_capped_confidence("High", "error_fallback", True),
+            self._compute_capped_confidence("High", "provider_failure", True),
             "Low"
         )
 
-    def test_error_fallback_low_stays_low(self):
+    def test_no_grounding_always_low(self):
         self.assertEqual(
-            self._compute_capped_confidence("Low", "error_fallback", True),
+            self._compute_capped_confidence("High", "no_grounding", False),
+            "Low"
+        )
+
+    def test_provider_failure_low_stays_low(self):
+        self.assertEqual(
+            self._compute_capped_confidence("Low", "provider_failure", True),
             "Low"
         )
 

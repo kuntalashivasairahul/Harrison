@@ -30,6 +30,28 @@ class TestThinkingBudget(unittest.TestCase):
         self.assertIsNotNone(config)
         self.assertEqual(config.thinking_budget, 0)
 
+    def test_gemini_3_uses_thinking_level_not_budget(self):
+        """Probed live: gemini-3.6-flash returns 400 INVALID_ARGUMENT for
+        thinking_budget=0 -- and 400 is INVALID_REQUEST, which is not
+        fallback-eligible, so it would abort the verifier stage instead of
+        deferring to the next deployment."""
+        config = GeminiProvider._thinking_config(LLMStage.VERIFIER, "gemini-3.6-flash")
+        self.assertEqual(config.thinking_level, "MINIMAL")
+        self.assertIsNone(config.thinking_budget)
+
+    def test_gemini_3_7_gets_the_lowest_level_it_accepts(self):
+        """gemini-3.7-flash rejects MINIMAL and *ignores* thinking_budget=0 --
+        248 thinking tokens against a 256-token ceiling, finish_reason
+        MAX_TOKENS. LOW is the floor it honours."""
+        config = GeminiProvider._thinking_config(LLMStage.VERIFIER, "gemini-3.7-flash")
+        self.assertEqual(config.thinking_level, "LOW")
+
+    def test_gemini_2_still_uses_the_budget_knob(self):
+        """thinking_level is rejected outright on 2.x."""
+        config = GeminiProvider._thinking_config(LLMStage.VERIFIER, "gemini-2.5-flash")
+        self.assertEqual(config.thinking_budget, 0)
+        self.assertIsNone(config.thinking_level)
+
     def test_optimizer_disables_thinking(self):
         self.assertIsNotNone(GeminiProvider._thinking_config(LLMStage.OPTIMIZER))
 

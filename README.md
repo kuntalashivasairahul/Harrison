@@ -6,7 +6,7 @@ HarrisonGPT is a production-grade, high-recall **Medical Retrieval-Augmented Gen
 
 ## 🚀 Key Features
 
-* **Stage-Aware LLM Routing:** Uses an approved local registry: Groq optimizes queries when explicitly enabled, Gemini remains the only draft and verification provider, and all provider fallback decisions are logged.
+* **Stage-Aware LLM Routing:** Uses an approved local registry: Groq optimizes queries when explicitly enabled, Gemini drafts and is the **only** verification provider, Mistral and Groq back the draft stage when Gemini is rate-limited, and all provider fallback decisions are logged.
 * **Low-Latency Semantic Caching:** Utilizes a disk-persistent semantic cache (`artifacts/semantic_cache.json`) to serve clinically equivalent queries instantly ($\ge 0.95$ Cosine Similarity) in under ~1ms.
 * **Hybrid Retrieval Pipeline:** Merges FAISS dense search using `BAAI/bge-m3` (1024 dimensions) with BM25Okapi sparse lexical search via Reciprocal Rank Fusion (RRF), alongside local context neighbor chunk expansion.
 * **Cross-Encoder Rerank Filtering:** Scores chunks via an `ms-marco-MiniLM-L-6-v2` cross-encoder, filtering out noisy passages scoring below `-3.0`.
@@ -20,7 +20,7 @@ HarrisonGPT is a production-grade, high-recall **Medical Retrieval-Augmented Gen
 * **API & Serving:** FastAPI, Uvicorn, Pydantic, Python-dotenv
 * **Vector & Lexical Search:** FAISS (CPU), Rank-BM25
 * **AI Embeddings & Reranking:** SentenceTransformers (`BAAI/bge-m3`, 1024 dimensions, and `ms-marco-MiniLM-L-6-v2`)
-* **Large Language Models:** Google Gen AI SDK (`google-genai`) for grounded answers and Groq for the optional query-optimizer route.
+* **Large Language Models:** Google Gen AI SDK (`google-genai`) for grounded answers and verification; Groq for the optional query-optimizer route; Mistral over stdlib `urllib` for draft failover.
 
 ---
 
@@ -90,6 +90,12 @@ GEMINI_RATE_LIMIT_COOLDOWN_SECONDS=60
 GROQ_ENABLED=false
 GROQ_API_KEY=""
 GROQ_OPTIMIZER_MODEL=openai/gpt-oss-20b
+
+# Mistral draft failover. Disabled unless both variables are set.
+MISTRAL_ENABLED=false
+MISTRAL_API_KEY=""
+MISTRAL_DRAFT_MODEL=mistral-large-latest
+
 LLM_OPTIMIZER_DEADLINE_SECONDS=8
 LLM_DRAFT_DEADLINE_SECONDS=30
 LLM_VERIFIER_DEADLINE_SECONDS=30
@@ -230,8 +236,54 @@ logged at WARNING; lift the registry value to raise the real ceiling.
 ### Stage 1 Provider Policy
 
 `backend/llm/model_registry.json` is the only approved-provider allowlist.
-Groq is used only for query optimization, then Gemini Flash-Lite is attempted,
-then the optimizer returns its deterministic local fallback. Gemini remains the
-sole draft and verifier provider. OpenRouter, OmniRoute, Cerebras, Mistral,
-NVIDIA NIM, and OpenCode are not enabled in Stage 1. Do not route textbook
-context through generic gateway auto-routing or context compression.
+Groq is used first for query optimization, then Gemini Flash-Lite is attempted,
+then the optimizer returns its deterministic local fallback.
+
+The **draft** stage falls over in priority order:
+
+| Priority | Deployment | Provider | Reached when |
+|---|---|---|---|
+| 10 | `gemini-primary` | Gemini | always tried first |
+| 20 | `gemini-draft-fallback` | Gemini | primary returned a fallback-eligible error |
+| 25 | `mistral-draft` | Mistral | both Gemini drafts failed |
+| 30 | `groq-draft` | Groq | Mistral also failed, **and** the prompt fits 5k input tokens |
+
+**Gemini remains the sole verifier.** A Mistral or Groq draft is still verified
+by Gemini against the same retrieved context, so the grounding and citation
+checks in `verify_answer()` apply unchanged; the failover widens who may write a
+first pass, never who approves it. A non-Gemini entry in the registry carrying
+the `verifier` stage is a test failure, not a review comment.
+
+Mistral outranks Groq deliberately. Groq's 8k-token-per-minute ceiling means
+`groq-draft` cannot carry a full `smart_summary` prompt at all, so ordering it
+first would have it decline exactly the requests the failover exists for.
+
+**Groq's free tier allows 8000 tokens per minute on every model it serves**
+(`gpt-oss-120b`, `gpt-oss-20b`, `qwen3.6-27b` — verified against the
+`x-ratelimit-limit-tokens` response header). `groq-draft` is therefore capped at
+`max_input_tokens: 5000` / `max_output_tokens: 2500`, well under a full
+`smart_summary` draft (~11.5k tokens), so it realistically only rescues shorter
+`qa` queries. Over-budget prompts are rejected by the router before the call
+rather than returning HTTP 413. `groq/compound` is the only model with real
+headroom (70k TPM) and is **not** eligible: it performs its own tool use and web
+search, which would put ungrounded claims into a medical answer.
+
+**Mistral's free tier is where the real headroom is** — 1 request/second,
+500,000 tokens/minute, 1 billion tokens/month. That is ~60× Groq's per-minute
+allowance, so `mistral-draft` carries a full `smart_summary` prompt (12,000
+input / 8,192 output tokens, matching `gemini-primary`) rather than only short
+`qa` queries. It is reached over `https://api.mistral.ai/v1/chat/completions`
+using `urllib` from the standard library; no SDK and no new dependency. Set
+`MISTRAL_ENABLED=true` and `MISTRAL_API_KEY` to arm it — with either missing the
+deployment stays dark and the draft chain behaves exactly as before.
+
+Free-tier Mistral keys carry the same posture as the free-tier Gemini keys this
+project already uses: the provider may train on submitted data. Only retrieved
+textbook context and the user's question are sent, which is what every other
+configured provider already receives.
+
+OpenRouter, OmniRoute, Cerebras, NVIDIA NIM, and OpenCode are not enabled. Do
+not route textbook context through generic gateway auto-routing or context
+compression — the objection is to an *unknown* downstream provider and
+retention policy, which is why named direct providers are approved and gateways
+are not.

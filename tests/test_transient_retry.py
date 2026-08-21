@@ -96,7 +96,7 @@ class TestAskLlmUsesTheWholeBudget(unittest.TestCase):
             )
 
         self.assertEqual(router.generate_for_stage.call_count, 3)
-        self.assertEqual(path, "error_fallback")
+        self.assertEqual(path, "provider_failure")
 
     def test_a_transient_failure_that_recovers_returns_a_real_answer(self):
         result = MagicMock(text="recovered answer", finish_reason="STOP")
@@ -115,7 +115,7 @@ class TestAskLlmUsesTheWholeBudget(unittest.TestCase):
             )
 
         self.assertEqual(draft, "recovered answer")
-        self.assertNotEqual(path, "error_fallback")
+        self.assertNotEqual(path, "provider_failure")
 
 
 if __name__ == "__main__":

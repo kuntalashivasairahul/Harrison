@@ -10,6 +10,7 @@ Unit tests for the refactored KeyManager:
 from __future__ import annotations
 
 import threading
+import time
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -214,8 +215,44 @@ class TestRateLimitCooldown(unittest.TestCase):
         self.assertEqual(second.api_key, "k1")
         self.assertEqual(km.available_key_count, 1)
 
-        km._rate_limited_until[0] = 0.0
+        km._rate_limited_until[(0, "")] = 0.0
         self.assertEqual(km.available_key_count, 2)
+
+    def test_cooldown_follows_the_error_not_the_global_cursor(self):
+        """mark_rate_limited() infers the model from the last next_client()
+        call, which is process-global: a concurrent request on another model
+        can advance it between the failure and the cooldown. The model carried
+        on the LLMError is the one that actually 429'd."""
+        km = _make_km("k0", "k1")
+        with patch("backend.llm.llm.genai.Client", side_effect=lambda api_key: MagicMock(api_key=api_key)):
+            km.next_client("gemini-2.5-flash")
+            km._current_model = "gemini-3.6-flash"    # a racing request wins
+            km.mark_rate_limited(cooldown_seconds=60, model="gemini-2.5-flash")
+
+        now = time.monotonic()
+        self.assertFalse(km._is_available(0, now, "gemini-2.5-flash"))
+        self.assertTrue(km._is_available(0, now, "gemini-3.6-flash"))
+
+    def test_a_429_on_one_model_leaves_the_key_usable_on_another(self):
+        """Free-tier quota is metered per project per model, and each key is a
+        separate project. Keying the cooldown by key index alone benched all of
+        a key's other models -- including Flash-Lite's 500/day -- for a 429 that
+        only exhausted one model's 20/day."""
+        km = _make_km("k0", "k1")
+        with patch("backend.llm.llm.genai.Client", side_effect=lambda api_key: MagicMock(api_key=api_key)):
+            first = km.next_client("gemini-2.5-flash")
+            self.assertEqual(first.api_key, "k0")
+            km.mark_rate_limited(cooldown_seconds=60)
+
+            # Same key, different model: still eligible.
+            self.assertTrue(km._is_available(0, time.monotonic(), "gemini-3.5-flash-lite"))
+            self.assertFalse(km._is_available(0, time.monotonic(), "gemini-2.5-flash"))
+
+            # Rotation on the exhausted model skips it; on a fresh model it does not.
+            km._current_idx = -1
+            self.assertEqual(km.next_client("gemini-2.5-flash").api_key, "k1")
+            km._current_idx = -1
+            self.assertEqual(km.next_client("gemini-3.5-flash-lite").api_key, "k0")
 
 
 class TestMakeClient(unittest.TestCase):

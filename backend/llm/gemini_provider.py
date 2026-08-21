@@ -10,20 +10,27 @@ from backend.llm.contracts import LLMError, LLMErrorCategory, LLMRequest, LLMRes
 
 def normalize_provider_error(exc: Exception, provider: str) -> LLMError:
     text = str(exc).lower()
-    if any(marker in text for marker in ("429", "quota", "rate limit", "resource exhausted", "resourceexhausted")):
+    # "rate_limit" (underscored) and 413 are both Groq spellings: a prompt that
+    # exceeds the per-minute token allowance comes back as HTTP 413 with
+    # code="rate_limit_exceeded", which matched none of the spaced markers and
+    # fell through to UNKNOWN — that is not fallback-eligible, so the stage gave
+    # up instead of trying the next deployment.
+    if any(marker in text for marker in ("429", "413", "quota", "rate limit", "rate_limit", "resource exhausted", "resourceexhausted")):
         return LLMError(LLMErrorCategory.RATE_LIMITED, str(exc), provider=provider)
     if any(marker in text for marker in ("timeout", "timed out", "deadline exceeded")):
         return LLMError(LLMErrorCategory.TIMEOUT, str(exc), provider=provider)
     if any(marker in text for marker in ("401", "403", "api key", "authentication", "permission denied")):
         return LLMError(LLMErrorCategory.AUTH, str(exc), provider=provider)
-    if any(marker in text for marker in ("400", "invalid argument", "context length", "max tokens")):
-        return LLMError(LLMErrorCategory.INVALID_REQUEST, str(exc), provider=provider)
-    # Checked before the 400/invalid-argument rule: a 404 body often mentions
-    # the model name and would otherwise fall through to UNKNOWN, which is not
-    # fallback-eligible. Three separate outages in this project traced back to a
-    # model being retired, so this needs its own category.
+    # Checked before the 400/invalid-argument rule — which is where this
+    # comment always claimed it ran, while the code had it second. Mistral
+    # reports a retired model as HTTP 400 with "does not exist" in the body, so
+    # the 400 marker won and the error became INVALID_REQUEST: not
+    # fallback-eligible, so one dead model aborted the whole stage. Three
+    # separate outages in this project traced back to a model being retired.
     if any(marker in text for marker in ("404", "not_found", "not found", "does not exist", "is not supported")):
         return LLMError(LLMErrorCategory.NOT_FOUND, str(exc), provider=provider)
+    if any(marker in text for marker in ("400", "invalid argument", "context length", "max tokens")):
+        return LLMError(LLMErrorCategory.INVALID_REQUEST, str(exc), provider=provider)
     if any(marker in text for marker in ("500", "502", "503", "unavailable", "connection reset")):
         return LLMError(LLMErrorCategory.UNAVAILABLE, str(exc), provider=provider)
     return LLMError(LLMErrorCategory.UNKNOWN, str(exc), provider=provider)
@@ -39,13 +46,15 @@ class GeminiProvider:
     def generate(self, request: LLMRequest, model: str) -> LLMResult:
         started = time.perf_counter()
         try:
-            client = self._key_manager_getter().next_client()
+            # Pass the model so KeyManager scopes rotation and cooldown to
+            # this model's quota bucket rather than the whole key.
+            client = self._key_manager_getter().next_client(model)
             config_kwargs = {
                 "system_instruction": request.system_instruction,
                 "temperature": request.temperature,
                 "max_output_tokens": request.max_output_tokens,
             }
-            thinking = self._thinking_config(request.stage)
+            thinking = self._thinking_config(request.stage, model)
             if thinking is not None:
                 config_kwargs["thinking_config"] = thinking
 
@@ -69,7 +78,9 @@ class GeminiProvider:
                 raw_response=response,
             )
         except Exception as exc:  # noqa: BLE001
-            raise normalize_provider_error(exc, self.name) from exc
+            error = normalize_provider_error(exc, self.name)
+            error.model = model
+            raise error from exc
 
     #: Stages that must not spend their output budget on an internal reasoning
     #: pass.  Gemini 2.5 models think by default, and those tokens come out of
@@ -84,8 +95,28 @@ class GeminiProvider:
     #: to reason about.  The draft stage keeps thinking, where it earns its cost.
     _NO_THINKING_STAGES = frozenset({LLMStage.VERIFIER, LLMStage.OPTIMIZER})
 
+    #: How to say "do not think" — the knob is model-dependent, and getting it
+    #: wrong fails loudly on one model and silently on another.  Probed live:
+    #:
+    #:   model                   budget=0        level=MINIMAL   level=LOW
+    #:   gemini-2.5-flash        no thinking     400             400
+    #:   gemini-3.5-flash        no thinking     no thinking     58 tok
+    #:   gemini-3-flash-preview  no thinking     no thinking     81 tok
+    #:   gemini-3.6-flash        400             no thinking     53 tok
+    #:   gemini-3.7-flash        IGNORED         400             38 tok
+    #:
+    #: gemini-3.6 rejecting budget=0 is a 400, which is INVALID_REQUEST and so
+    #: not fallback-eligible: it would abort the verifier stage outright rather
+    #: than deferring to the next deployment.  gemini-3.7 is worse — it accepts
+    #: the zero budget and thinks anyway (248 tokens, finish_reason=MAX_TOKENS
+    #: on a 256-token ceiling), which is the silent MAX_TOKENS verifier failure
+    #: this whole mechanism exists to prevent.  No setting reaches zero thinking
+    #: on 3.7, so it gets the lowest level it accepts and is kept off the
+    #: verifier stage in the registry.
+    _THINKING_LEVEL_BY_MODEL = {"gemini-3.7-flash": "LOW"}
+
     @classmethod
-    def _thinking_config(cls, stage: LLMStage):
+    def _thinking_config(cls, stage: LLMStage, model: str = ""):
         # Imported at call time, not module scope.  A module-level binding is
         # captured whenever this module happens to be first imported, and one
         # test suite imports it while a stub SDK is installed in sys.modules —
@@ -99,7 +130,12 @@ class GeminiProvider:
         if thinking_config_cls is None:
             # Older SDK without a thinking budget knob — nothing to disable.
             return None
-        return thinking_config_cls(thinking_budget=0)
+        if not model.startswith("gemini-3"):
+            # 2.x and anything unrecognized: thinking_level is rejected there,
+            # and the zero budget is the long-standing working default.
+            return thinking_config_cls(thinking_budget=0)
+        level = cls._THINKING_LEVEL_BY_MODEL.get(model, "MINIMAL")
+        return thinking_config_cls(thinking_level=level)
 
     @staticmethod
     def _generate_config(**kwargs):

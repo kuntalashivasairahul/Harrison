@@ -107,3 +107,20 @@ class TestOptimizerModelIsLive(unittest.TestCase):
         from backend.llm.router import load_registry
 
         self.assertGreaterEqual(load_registry()["groq-optimizer"].max_output_tokens, _MAX_TOKENS)
+
+
+class TestGroqTokenPerMinuteRejection(unittest.TestCase):
+    """Groq answers an over-budget prompt with HTTP 413 code=rate_limit_exceeded.
+    That spelling matched none of the spaced rate-limit markers, so it
+    normalized to UNKNOWN and the draft stage stopped instead of failing over."""
+
+    def test_413_rate_limit_exceeded_is_categorized_as_rate_limited(self) -> None:
+        from backend.llm.gemini_provider import normalize_provider_error
+
+        exc = Exception(
+            "Error code: 413 - {'error': {'message': 'Request too large for model "
+            "`openai/gpt-oss-120b` ... on tokens per minute (TPM): Limit 8000, "
+            "Requested 11554', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}"
+        )
+        normalized = normalize_provider_error(exc, "groq")
+        self.assertEqual(normalized.category, LLMErrorCategory.RATE_LIMITED)

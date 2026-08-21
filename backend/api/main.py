@@ -20,7 +20,12 @@ from pydantic import BaseModel, Field
 # diagnostics emitted during module import are captured too.  See
 # backend/logging_config.py for why this is needed under uvicorn.
 from backend.logging_config import configure_logging
-from backend.observability import metrics, new_request_id, request_id_var
+from backend.observability import (
+    metrics,
+    new_request_id,
+    request_id_var,
+    start_request_budget,
+)
 
 configure_logging()
 
@@ -35,6 +40,7 @@ from backend.config import (
     DEFAULT_RERANK_POOL,
     EMBEDDING_DIM,
     EMBEDDING_MODEL,
+    LLM_TOTAL_REQUEST_BUDGET_SECONDS,
     RERANK_MODEL,
     RERANK_SCORE_THRESHOLD,
     RRF_K,
@@ -205,7 +211,7 @@ app.mount("/pages", StaticFiles(directory=str(_STORAGE_DIR)), name="pages")
 SMART_SUMMARY_K = int(os.getenv("SMART_SUMMARY_K", "48"))
 SMART_SUMMARY_FINAL_K = int(os.getenv("SMART_SUMMARY_FINAL_K", "12"))
 SMART_SUMMARY_RERANK_POOL = int(os.getenv("SMART_SUMMARY_RERANK_POOL", "16"))
-CACHE_SCHEMA_VERSION = "semantic-cache-v2"
+CACHE_SCHEMA_VERSION = "semantic-cache-v3"
 
 # --------------------------------------------------------------------
 # SEMANTIC CACHE — global singleton, loaded once at startup from disk.
@@ -258,6 +264,26 @@ def _final_k_for(mode: str, complexity: str) -> int:
     if mode == "smart_summary":
         return min(dynamic_final_k, SMART_SUMMARY_FINAL_K)
     return dynamic_final_k
+
+
+def _candidate_signatures(*, mode: str, disable_verifier: bool) -> list[dict[str, Any]]:
+    """Every signature this request could legitimately hit.
+
+    ``final_k`` is the only signature field the query optimizer decides, via
+    ``complexity``, and it has exactly two possible values.  Probing both is a
+    pair of in-memory matmuls; waiting for the optimizer to tell us which one
+    to probe cost a full Groq round-trip on every cache hit.
+    """
+    candidates: list[dict[str, Any]] = []
+    for complexity in ("simple", "complex"):
+        signature = _cache_signature(
+            mode=mode,
+            disable_verifier=disable_verifier,
+            final_k=_final_k_for(mode, complexity),
+        )
+        if signature not in candidates:
+            candidates.append(signature)
+    return candidates
 
 
 def _should_save_to_cache(
@@ -332,8 +358,53 @@ def ask_question(req: QueryRequest, request: Request) -> QueryResponse:
     raw_query = req.query
     mode = req.mode
 
+    # Open the wall-clock budget for everything below.  Stage deadlines clamp
+    # against what is left of it and retries stop when it is spent.
+    start_request_budget(LLM_TOTAL_REQUEST_BUDGET_SECONDS)
+
     # ----------------------------------------------------------------
-    # 0️⃣  QueryOptimizer — pre-retrieval gatekeeper & context enhancer
+    # 0️⃣  Semantic Cache — probed before any LLM call
+    # ----------------------------------------------------------------
+    # This used to sit *behind* the optimizer, so every hit paid a full Groq
+    # round-trip (measured 697ms) to look up an answer already on disk.  The
+    # embedding is taken from the raw query rather than the expanded one for
+    # the same reason: the expansion is an LLM output, and keying on it makes
+    # the key unobtainable without the call the cache exists to avoid.
+    #
+    # A hit skips the non-medical gatekeeper, which is safe: only a query that
+    # already passed it can be in the cache, and the 0.95 similarity floor
+    # keeps a non-medical query from matching a medical entry.
+    query_embedding: list[float] = embed_text(raw_query).flatten().tolist()
+
+    for candidate in _candidate_signatures(mode=mode, disable_verifier=req.disable_verifier):
+        cached = _cache.check_cache(query_embedding, metadata=candidate)
+        if cached is None:
+            continue
+        total_time = time.perf_counter() - start_total
+        timings["total_request"] = total_time
+        log.info("ask_question: TIMINGS (cache hit)  total_request=%.3fs", total_time)
+        metrics.increment("ask_total")
+        metrics.increment("cache_hit")
+        metrics.observe_timings(timings)
+        # visual_context is rebuilt from the cached page labels against THIS
+        # request's host.  It used to be served straight from the cache, which
+        # baked in whichever host first populated the entry — serve the same
+        # cache behind a different hostname and every image link pointed at the
+        # old one.  base_url is deliberately not part of the cache signature;
+        # the labels are host-independent, the URLs are not.
+        return QueryResponse(
+            answer=cached["answer"],
+            confidence=cached["confidence"],
+            sources=cached["sources"],
+            visual_context=resolve_page_urls(
+                sources=cached.get("sources", []),
+                base_url=str(request.base_url).rstrip("/"),
+            ),
+            timings=timings,
+        )
+
+    # ----------------------------------------------------------------
+    # 1️⃣  QueryOptimizer — pre-retrieval gatekeeper & context enhancer
     # ----------------------------------------------------------------
     # The agent runs a fast LLM call (llama-3.1-8b-instant) to:
     #   a) Detect whether the query is medical in nature.
@@ -390,50 +461,13 @@ def ask_question(req: QueryRequest, request: Request) -> QueryResponse:
     # or failed LLM calls conservatively maximise recall.
     _complexity: str     = optimized.get("complexity", "complex")
     dynamic_final_k = _final_k_for(mode, _complexity)
+    # The signature the answer will actually be stored under.  The probe above
+    # tried both candidates; this is the one this request really used.
     cache_signature = _cache_signature(
         mode=mode,
         disable_verifier=req.disable_verifier,
         final_k=dynamic_final_k,
     )
-
-    # ----------------------------------------------------------------
-    # 1️⃣  Semantic Cache — check before any retrieval or LLM work
-    # ----------------------------------------------------------------
-    # embed_text() reuses the already-loaded retrieval embedding model.
-    # The vector is flattened to a plain list for JSON-serialisable storage.
-    query_embedding: list[float] = embed_text(search_query).flatten().tolist()
-
-    cached = _cache.check_cache(query_embedding, metadata=cache_signature)
-    if cached is not None:
-        # ── Cache HIT: return instantly, zero FAISS/Groq cost ──
-        total_time = time.perf_counter() - start_total
-        timings["total_request"] = total_time
-        log.info(
-            "ask_question: TIMINGS (cache hit)  total_request=%.3fs  optimizer=%.3fs",
-            total_time,
-            timings["optimizer"],
-        )
-        # visual_context is rebuilt from the cached page labels against THIS
-        # request's host.  It used to be served straight from the cache, which
-        # baked in whichever host first populated the entry — serve the same
-        # cache behind a different hostname and every image link pointed at the
-        # old one.  base_url is deliberately not part of the cache signature;
-        # the labels are host-independent, the URLs are not.
-        metrics.increment("ask_total")
-        metrics.increment("cache_hit")
-        metrics.observe_timings(timings)
-        return QueryResponse(
-            answer=cached["answer"],
-            confidence=cached["confidence"],
-            sources=cached["sources"],
-            visual_context=resolve_page_urls(
-                sources=cached.get("sources", []),
-                base_url=str(request.base_url).rstrip("/"),
-            ),
-            timings=timings,
-        )
-
-    # ── Cache MISS: run the full pipeline ──
 
     # 2️⃣ Retrieve (final_k scaled by query complexity)
     if mode == "smart_summary":
@@ -511,11 +545,12 @@ def ask_question(req: QueryRequest, request: Request) -> QueryResponse:
     #   verified          + truncated     → Medium max (draft was cut)
     #   draft_fallback    + any           → Medium max (verifier failed)
     #   graceful_fallback + any           → Low max (both layers failed)
-    #   error_fallback    + any           → Low max (all API retries failed)
+    #   no_grounding      + any           → Low max (no usable context)
+    #   provider_failure  + any           → Low max (API/quota/outage)
     #
-    # These are the only four paths ask_llm() returns; the table previously
-    # also handled a "partial_verified" path that nothing ever produced.
-    if returned_path in ("graceful_fallback", "error_fallback"):
+    # These are the only paths ask_llm() returns; the table previously also
+    # handled a "partial_verified" path that nothing ever produced.
+    if returned_path in ("graceful_fallback", "no_grounding", "provider_failure"):
         confidence = "Low"
     elif returned_path == "draft_fallback" and confidence == "High":
         confidence = "Medium"
