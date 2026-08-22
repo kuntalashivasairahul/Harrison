@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<!-- viewport-fit=cover is what makes env(safe-area-inset-*) report anything but
+     zero; without it the notch rules in site.css are silently inert. -->
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="light">
+<title>{% block title %}HarrisonGPT{% endblock %}</title>
+<meta name="description" content="{% block description %}A grounded reference assistant over Harrison's Principles of Internal Medicine. Every claim carries a page citation you can open.{% endblock %}">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%238B2635'/%3E%3Ctext x='16' y='24' font-family='Georgia,serif' font-size='21' fill='%23FAF8F4' text-anchor='middle'%3EH%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="/static/tokens.css">
+<link rel="stylesheet" href="/static/site.css">
+{% block head %}{% endblock %}
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="nav">
+  <div class="wrap">
+    <a class="brand" href="/">HarrisonGPT <span>Internal Medicine</span></a>
+    <nav>
+      <a href="/#how">How it works</a>
+      <a href="/#limits">Limits</a>
+      <a class="btn sm" href="/chat">Try it now</a>
+    </nav>
+  </div>
+</header>
+
+<main id="main">{% block content %}{% endblock %}</main>
+
+<footer class="foot">
+  <div class="wrap">
+    <span>Reference tool for study. Not a diagnostic device.</span>
+    <a href="/health" style="margin-left:auto">Status</a>
+  </div>
+</footer>
+<script src="/static/motion.js" defer></script>
+{% block scripts %}{% endblock %}
+</body>
+</html>

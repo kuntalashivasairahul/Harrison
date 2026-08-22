@@ -1,0 +1,173 @@
+{% extends "base.html" %}
+{% block title %}HarrisonGPT — grounded answers from Harrison's Principles of Internal Medicine{% endblock %}
+
+{% block head %}
+<style>
+.hero{padding:var(--s16) 0 var(--s12)}
+.hero h1{font:600 clamp(30px,5vw,46px)/1.15 var(--sans);color:var(--ink-900);
+  letter-spacing:-.02em;margin:0 0 var(--s4);max-width:19ch}
+.hero .lede{font:19px/30px var(--serif);color:var(--ink-700);max-width:56ch;
+  margin:0 0 var(--s8)}
+.hero .cta{display:flex;gap:var(--s3);flex-wrap:wrap;align-items:center}
+.hero .cta small{color:var(--ink-300);font-size:13px}
+
+.stat{display:flex;gap:var(--s8);flex-wrap:wrap;margin-top:var(--s12);
+  padding-top:var(--s6);border-top:1px solid var(--ink-100)}
+.stat div b{display:block;font:600 22px/28px var(--sans);color:var(--ink-900);
+  font-variant-numeric:tabular-nums}
+.stat div span{font:500 11px/16px var(--mono);color:var(--ink-300);
+  text-transform:uppercase;letter-spacing:.08em}
+
+section{padding:var(--s12) 0}
+h2{font:600 26px/34px var(--sans);color:var(--ink-900);letter-spacing:-.01em;
+  margin:0 0 var(--s3);max-width:26ch;text-wrap:balance}
+.sub{font:17px/28px var(--serif);color:var(--ink-500);max-width:60ch;margin:0 0 var(--s8)}
+
+/* the differentiator: answer beside the real page */
+.demo{display:grid;grid-template-columns:minmax(0,1fr) 260px;gap:var(--s6);
+  align-items:start}
+@media(max-width:860px){.demo{grid-template-columns:1fr}}
+.demo .ans{background:var(--surface);border:1px solid var(--ink-100);
+  border-radius:var(--r-md);padding:var(--s6)}
+.demo .ans p{font:17px/28px var(--serif);color:var(--ink-700);margin:0 0 var(--s3);
+  max-width:var(--measure)}
+.demo .ans p:last-child{margin:0}
+.cite{font:500 12px/1 var(--mono);color:var(--accent-600);background:transparent;
+  border:1px solid var(--accent-100);border-radius:var(--r-sm);padding:2px 5px;
+  white-space:nowrap}
+.demo .scan{border:1px solid var(--ink-100);background:var(--surface);
+  border-radius:var(--r-none)}
+.demo .scan .pg{aspect-ratio:3/4;background:repeating-linear-gradient(
+  #F7F4EE 0 5px,#EFEAE0 5px 6px)}
+.demo .scan .cap{font:500 11px/16px var(--mono);color:var(--ink-300);
+  padding:7px 9px;border-top:1px solid var(--ink-100)}
+
+.steps{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));
+  gap:var(--s3);counter-reset:s}
+.step{background:var(--surface);border:1px solid var(--ink-100);
+  border-radius:var(--r-md);padding:var(--s6)}
+.step::before{counter-increment:s;content:counter(s,decimal-leading-zero);
+  font:500 11px/16px var(--mono);color:var(--ink-300);display:block;
+  margin-bottom:var(--s3)}
+.step h3{font:600 16px/24px var(--sans);color:var(--ink-900);margin:0 0 var(--s2)}
+.step p{margin:0;font-size:14px;line-height:21px;color:var(--ink-500)}
+
+.limits{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));
+  gap:var(--s6);margin-top:var(--s6)}
+.limits h3{font:600 15px/22px var(--sans);color:var(--ink-900);margin:0 0 var(--s2);
+  display:flex;align-items:center;gap:var(--s2)}
+.limits p{margin:0;font-size:14px;line-height:22px;color:var(--ink-500)}
+.refusal-demo{background:var(--ink-050);border-left:3px solid var(--ink-500);
+  border-radius:0 var(--r-sm) var(--r-sm) 0;padding:var(--s4) var(--s6);margin-top:var(--s4)}
+.refusal-demo p{margin:0;font:17px/28px var(--serif);color:var(--ink-700)}
+
+.close{background:var(--surface);border:1px solid var(--ink-100);
+  border-radius:var(--r-md);padding:var(--s12) var(--s8);text-align:center}
+.close h2{margin:0 auto var(--s4);max-width:24ch}
+.close .sub{margin:0 auto var(--s6)}
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="wrap">
+
+  <div class="hero">
+    <h1>Every answer points back to the page it came from.</h1>
+    <p class="lede">A reference assistant that reads <em>Harrison's Principles of
+    Internal Medicine</em> and cites it — not from memory, but from the retrieved
+    text, with the scanned page one click away.</p>
+    <div class="cta">
+      <a class="btn" href="/chat">Try it now</a>
+      <a class="btn ghost" href="#how">How it works</a>
+      <small>No sign-up.</small>
+    </div>
+    <div class="stat">
+      <div><b>{{ chunk_count }}</b><span>Indexed passages</span></div>
+      <div><b>Hybrid</b><span>Vector + BM25 + rerank</span></div>
+      <div><b>Verified</b><span>Second-pass check</span></div>
+    </div>
+  </div>
+
+  <section id="cites">
+    <h2>Citations you can actually open</h2>
+    <p class="sub">Most tools ask you to trust a page number. This one shows you
+    the page. Each <code style="font:12px var(--mono)">[p:NNN]</code> is a link to
+    the scan it was drawn from.</p>
+    <div class="demo">
+      <div class="ans">
+        <p>Begin with <strong>isotonic saline</strong> at 1&ndash;1.5&nbsp;L over
+        the first hour, then reassess corrected sodium and haemodynamic status
+        before selecting the subsequent rate.<span class="cite">p.3254</span></p>
+        <p>Withhold insulin until serum K&#8314; exceeds
+        3.3&nbsp;mEq/L.<span class="cite">p.3254</span></p>
+        <p>Add dextrose once plasma glucose falls below 200&nbsp;mg/dL, and
+        continue insulin until the anion gap closes.<span class="cite">p.3255</span></p>
+        <p>Rehydration alone accounts for much of the initial fall in plasma
+        glucose.<span class="cite">p.3255</span></p>
+      </div>
+      <div class="scan"><div class="pg"></div><div class="cap">p.3254 &nbsp;&#8599;</div></div>
+    </div>
+  </section>
+
+  <section id="how">
+    <h2>How an answer gets made</h2>
+    <p class="sub">Five stages. Retrieval happens before generation, so the model
+    writes from retrieved text rather than recall.</p>
+    <div class="steps">
+      <div class="step"><h3>Expand</h3><p>Acronyms resolved and clinical framing
+        added. Non-medical questions stop here.</p></div>
+      <div class="step"><h3>Retrieve</h3><p>Dense vector search and BM25 run in
+        parallel, then fuse.</p></div>
+      <div class="step"><h3>Rerank</h3><p>A cross-encoder scores each passage
+        against your question. Weak matches are dropped outright.</p></div>
+      <div class="step"><h3>Draft</h3><p>The answer is written from the surviving
+        passages only, citing each page it uses.</p></div>
+      <div class="step"><h3>Verify</h3><p>A second pass checks every claim against
+        the same passages before you see it.</p></div>
+    </div>
+  </section>
+
+  <section id="limits">
+    <h2>What it will not do</h2>
+    <p class="sub">The useful part of a reference tool is knowing where it stops.</p>
+    <div class="limits">
+      <div>
+        <h3>It refuses rather than guesses</h3>
+        <p>The corpus has gaps. When the retrieved text does not support an
+        answer, you get this &mdash; verbatim, unsoftened, with no invented
+        citation to dress it up.</p>
+        <div class="refusal-demo"><p>Insufficient information in the provided context.</p></div>
+      </div>
+      <div>
+        <h3>It tells you how sure it is</h3>
+        <p>Every answer carries a confidence grade derived from retrieval
+        quality &mdash; never asserted by the model about itself.</p>
+        <div style="display:flex;gap:var(--s2);flex-wrap:wrap;margin-top:var(--s4)">
+          <span class="conf conf-high"><i>&#9679;&#9679;&#9679;</i>High</span>
+          <span class="conf conf-medium"><i>&#9679;&#9679;&#9675;</i>Medium</span>
+          <span class="conf conf-low"><i>&#9679;&#9675;&#9675;</i>Low</span>
+        </div>
+        <h3 style="margin-top:var(--s6)">It is one textbook</h3>
+        <p>Answers reflect Harrison's, and nothing else. No web search, no other
+        sources, no clinical guidelines beyond what the text carries.</p>
+      </div>
+    </div>
+    <div class="disclaimer" style="margin-top:var(--s8)">
+      <p><strong>Not medical advice.</strong> HarrisonGPT is a study and reference
+      aid for readers of Harrison's Principles of Internal Medicine. It is not a
+      diagnostic device, it has not been clinically validated, and it must not be
+      used to guide the care of a patient. Verify everything against the primary
+      text and current guidance before acting on it.</p>
+    </div>
+  </section>
+
+  <section>
+    <div class="close">
+      <h2>Ask it something you could look up.</h2>
+      <p class="sub">Then check the page it cites &mdash; that is the whole point.</p>
+      <a class="btn" href="/chat">Try it now</a>
+    </div>
+  </section>
+
+</div>
+{% endblock %}

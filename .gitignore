@@ -36,3 +36,9 @@ Thumbs.db
 
 *.pdf
 artifacts/semantic_cache.json
+
+# Local tool state / benchmark scratch output
+.serena/
+.playwright-mcp/
+artifacts/benchmark/
+.claude/settings.local.json

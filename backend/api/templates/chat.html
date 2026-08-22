@@ -1,0 +1,238 @@
+{% extends "base.html" %}
+{% block title %}Ask — HarrisonGPT{% endblock %}
+
+{% block head %}
+<style>
+.ask{padding:var(--s8) 0 var(--s4)}
+.ask form{display:flex;gap:var(--s3);flex-wrap:wrap;align-items:center}
+.ask .field{flex:1 1 320px;position:relative}
+.ask input[type=text]{width:100%;min-height:44px;font:16px/22px var(--sans);
+  color:var(--ink-900);background:var(--surface);border:1px solid var(--ink-100);
+  border-radius:var(--r-sm);padding:11px 14px}
+.ask input::placeholder{color:var(--ink-300)}
+.ask input:focus-visible{outline:2px solid var(--accent-600);outline-offset:-1px}
+.seg{display:inline-flex;border:1px solid var(--ink-100);border-radius:var(--r-sm);
+  overflow:hidden;background:var(--surface)}
+.seg button{border:0;background:transparent;font:500 14px/1 var(--sans);
+  color:var(--ink-500);padding:0 var(--s4);min-height:44px;cursor:pointer;
+  transition:background var(--fast),color var(--fast)}
+.seg button+button{border-left:1px solid var(--ink-100)}
+.seg button[aria-pressed=true]{background:var(--accent-600);color:#fff}
+.seg button:focus-visible{outline:2px solid var(--accent-600);outline-offset:-2px}
+.hint{font-size:13px;color:var(--ink-300);margin:var(--s3) 0 0}
+.hint button{background:none;border:0;color:var(--accent-600);cursor:pointer;
+  font:inherit;text-decoration:underline;text-underline-offset:2px;
+  /* 13px text is a 22px control; WCAG 2.5.8 wants 24.  These are standalone
+     buttons, not citations inline in a sentence, so the exception doesn't
+     apply to them. */
+  padding:var(--s1) 0}
+
+.result{padding-bottom:var(--s16)}
+.split{display:grid;grid-template-columns:minmax(0,1fr) clamp(230px,26vw,300px);
+  gap:var(--s6);align-items:start}
+@media(max-width:900px){.split{grid-template-columns:1fr}}
+
+.answer{background:var(--surface);border:1px solid var(--ink-100);
+  border-radius:var(--r-md);padding:var(--s8)}
+.answer .head{display:flex;gap:var(--s3);align-items:center;flex-wrap:wrap;
+  padding-bottom:var(--s4);margin-bottom:var(--s6);border-bottom:1px solid var(--ink-100)}
+.answer .head .q{font:500 13px/18px var(--sans);color:var(--ink-300);flex:1 1 200px}
+.doc h3{font:600 21px/28px var(--sans);color:var(--ink-900);margin:var(--s6) 0 var(--s2)}
+.doc h3:first-child{margin-top:0}
+.doc p,.doc li{font:17px/28px var(--serif);color:var(--ink-700);max-width:var(--measure)}
+.doc p{margin:0 0 var(--s3)}
+.doc ul{margin:0 0 var(--s3);padding-left:22px}
+.doc li{margin-bottom:var(--s1)}
+.doc strong{color:var(--ink-900);font-weight:600}
+.doc .qr{background:var(--well);border-radius:var(--r-sm);padding:var(--s4) var(--s6);
+  margin-top:var(--s6)}
+.doc .qr h3{margin-top:0;font-size:18px}
+
+.cite{font:500 12px/1 var(--mono);color:var(--accent-600);background:transparent;
+  border:1px solid var(--accent-100);border-radius:var(--r-sm);padding:2px 5px;
+  margin-left:3px;
+  cursor:pointer;white-space:nowrap;vertical-align:baseline;
+  transition:background var(--fast),border-color var(--fast)}
+.cite:hover{background:var(--accent-100);border-color:var(--accent-600)}
+.cite.inert{color:var(--ink-300);border-color:var(--ink-100);cursor:default}
+.cite.inert:hover{background:transparent;border-color:var(--ink-100)}
+
+.refusal{background:var(--ink-050);border-left:3px solid var(--ink-500);
+  border-radius:0 var(--r-sm) var(--r-sm) 0;padding:var(--s6)}
+.refusal .k{font:500 11px/16px var(--mono);color:var(--ink-300);
+  text-transform:uppercase;letter-spacing:.08em;margin-bottom:var(--s2)}
+.refusal p{margin:0;font:17px/28px var(--serif);color:var(--ink-700)}
+.refusal .why{margin-top:var(--s4);font:14px/21px var(--sans);color:var(--ink-500)}
+
+.rail{display:flex;flex-direction:column;gap:var(--s3);position:sticky;top:84px;
+  max-height:min(74vh,640px);overflow-y:auto;overscroll-behavior:contain;padding-right:4px}
+.rail .lbl{font:500 11px/16px var(--mono);color:var(--ink-300);
+  text-transform:uppercase;letter-spacing:.08em}
+.scan{border:1px solid var(--ink-100);background:var(--surface);
+  border-radius:var(--r-none);padding:0;cursor:pointer;display:block;width:100%;
+  text-align:left;transition:border-color var(--fast);overflow:hidden}
+.scan:hover,.scan.active,.scan.peek{border-color:var(--accent-600)}
+.scan.active{box-shadow:inset 0 0 0 1px var(--accent-600)}
+.scan img{display:block;width:100%;height:auto;background:var(--well)}
+.scan .cap{font:500 11px/16px var(--mono);color:var(--ink-300);padding:7px 9px;
+  border-top:1px solid var(--ink-100);display:flex;justify-content:space-between}
+@media(max-width:900px){
+  .rail{position:static;max-height:none;flex-direction:row;overflow-x:auto}
+  .rail .lbl{display:none}
+  .rail .scan{flex:0 0 140px}
+}
+
+.strip{display:flex;flex-wrap:wrap;width:fit-content;max-width:100%;
+  border:1px solid var(--ink-100);
+  border-radius:var(--r-sm);overflow:hidden;margin-top:var(--s6);
+  font:500 11px/16px var(--mono);color:var(--ink-300)}
+.strip span{padding:8px 12px;border-right:1px solid var(--ink-100);
+  font-variant-numeric:tabular-nums}
+.strip span:last-child{border-right:0;color:var(--ink-700);background:var(--well)}
+.strip b{color:var(--ink-500);font-weight:500}
+
+.stages{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:var(--s6)}
+.st{font:500 11px/16px var(--mono);padding:5px 9px;border-radius:var(--r-sm);
+  background:var(--ink-050);color:var(--ink-300)}
+.st.done{background:var(--hi-bg);color:var(--hi-fg)}
+.st.now{background:var(--accent-100);color:var(--accent-600)}
+.sk{height:13px;border-radius:2px;background:var(--ink-050);
+  animation:pulse 1400ms ease-in-out infinite}
+.sk+.sk{margin-top:11px}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.45}}
+
+.err{background:var(--md-bg);border-left:3px solid var(--md-fg);
+  border-radius:0 var(--r-sm) var(--r-sm) 0;padding:var(--s4) var(--s6)}
+.err p{margin:0;font-size:15px;line-height:23px;color:var(--ink-700)}
+
+/* The closed state relies on the UA's dialog:not([open]) rule outranking
+   .lightbox — true, but subtle.  Stated outright instead. */
+.lightbox{display:none}
+/* The UA sheet gives <dialog> width/height:fit-content, which beats inset:0 —
+   without the explicit viewport sizing the dim only covers the image box. */
+.lightbox[open]{position:fixed;inset:0;width:100vw;height:100vh;
+  max-width:100vw;max-height:100vh;margin:0;border:0;z-index:50;
+  background:rgba(26,23,20,.72);padding:var(--s6);
+  display:flex;align-items:center;justify-content:center}
+.lightbox::backdrop{background:rgba(26,23,20,.72)}
+.lightbox img{max-width:100%;max-height:86vh;box-shadow:var(--shadow-lightbox);
+  background:var(--surface);cursor:zoom-in}
+/* A two-column textbook scan fitted to a 390px phone is not readable — that is
+   the whole artefact this product points at, rendered useless by the fit.  The
+   image gets a zoomed state and the dialog becomes its viewport.
+   `safe` is load-bearing: a plain `center` on a flex container pushes overflow
+   past the scroll origin, so the top-left of a zoomed page becomes unreachable
+   in exactly the browsers that need panning most. */
+.lightbox[open]{overflow:auto;align-items:safe center;justify-content:safe center}
+.lightbox img.zoomed{max-width:none;max-height:none;width:240%;cursor:zoom-out}
+/* fixed, not absolute: the dialog scrolls once the page is zoomed, and an
+   absolute close button pans off with it — stranding the reader inside a
+   full-screen scan whose only other exit is a hardware key. */
+.lightbox .close-x{position:fixed;z-index:1;
+  top:max(var(--s4),env(safe-area-inset-top));
+  right:max(var(--s4),env(safe-area-inset-right))}
+[hidden]{display:none!important}
+
+/* ── touch and small viewports ────────────────────────────────────
+   On iOS the collapsing URL bar sits inside 100vh but outside the visible
+   area, so a 100vh dialog pushes its own close button off the screen.  dvh
+   tracks the visible box.  Behind @supports because the vh values above are
+   the correct fallback, not a bug. */
+@supports(height:100dvh){
+  .lightbox[open]{height:100dvh;max-height:100dvh}
+  .lightbox img{max-height:86dvh}
+  /* Only where the rail is still a sticky column — below 900px it is a
+     filmstrip with max-height:none, and re-capping it here would undo that. */
+  @media(min-width:901px){.rail{max-height:min(74dvh,640px)}}
+}
+
+/* WCAG 2.5.8 exempts a target inline in a sentence, which is why the citation
+   chip is allowed to be 18px tall for a mouse.  A finger is not a mouse: on a
+   coarse pointer the chip buys height with padding and gives it straight back
+   with margin, so the line box — and the paragraph's leading — do not move. */
+@media(pointer:coarse){
+  .cite{padding-top:6px;padding-bottom:6px;margin-top:-4px;margin-bottom:-4px}
+}
+
+/* The rail becomes a horizontal filmstrip below 900px.  Snapping makes a
+   thumb-flick land on a page instead of between two. */
+@media(max-width:900px){
+  .rail{scroll-snap-type:x proximity}
+  .rail .scan{scroll-snap-align:start}
+}
+
+/* 32px of card padding on a 390px screen costs roughly four characters a line
+   of a 17px serif, on the one element that exists to be read. */
+@media(max-width:560px){
+  .answer{padding:var(--s4)}
+  .doc .qr{padding:var(--s4)}
+  .ask{padding-top:var(--s6)}
+}
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="wrap">
+
+  <div class="ask">
+    <form id="ask-form">
+      <div class="field">
+        <label for="q" class="skip">Your question</label>
+        <input id="q" name="q" type="text" autocomplete="off" autofocus
+               maxlength="{{ max_query_chars }}"
+               placeholder="Ask about a condition, drug, or presentation…">
+      </div>
+      <div class="seg" role="group" aria-label="Answer format">
+        <button type="button" data-mode="smart_summary" aria-pressed="true">Smart Summary</button>
+        <button type="button" data-mode="qa" aria-pressed="false">Q&amp;A</button>
+      </div>
+      <button class="btn" id="submit" type="submit">Ask</button>
+    </form>
+    <p class="hint">Try
+      <button type="button" class="ex">Management of diabetic ketoacidosis</button> ·
+      <button type="button" class="ex">Duke criteria for infective endocarditis</button>
+    </p>
+  </div>
+
+  <div class="result">
+    <div id="pending" hidden aria-live="polite">
+      <div class="answer">
+        <div class="stages" id="stages"></div>
+        <div class="sk" style="width:96%"></div><div class="sk" style="width:88%"></div>
+        <div class="sk" style="width:93%"></div><div class="sk" style="width:64%"></div>
+      </div>
+    </div>
+
+    <div id="error" hidden class="err" role="alert"><p></p></div>
+
+    <div id="output" hidden>
+      <div class="split">
+        <div>
+          <div class="answer">
+            <div class="head">
+              <span class="conf" id="conf"></span>
+              <span class="q" id="echo"></span>
+            </div>
+            <div class="doc" id="doc"></div>
+          </div>
+          <div class="strip" id="strip"></div>
+        </div>
+        <aside class="rail" id="rail" aria-label="Cited pages"></aside>
+      </div>
+    </div>
+  </div>
+
+  <div class="disclaimer" style="margin-bottom:var(--s12)">
+    <p><strong>Not medical advice.</strong> A study aid, not a diagnostic device.
+    Verify against the primary text before acting on anything here.</p>
+  </div>
+
+</div>
+
+<dialog class="lightbox" id="lightbox">
+  <button class="btn ghost sm close-x" id="lb-close" style="background:var(--surface)">Close</button>
+  <img id="lb-img" alt="">
+</dialog>
+{% endblock %}
+
+{% block scripts %}<script src="/static/chat.js"></script>{% endblock %}

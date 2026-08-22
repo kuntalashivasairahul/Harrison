@@ -14,6 +14,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
 # backend.config first: it loads backend/.env, and configure_logging() reads
@@ -213,6 +214,44 @@ def require_admin(x_admin_token: str = Header(default="")) -> None:
 _STORAGE_DIR = Path(__file__).resolve().parents[2] / "storage" / "pages"
 _STORAGE_DIR.mkdir(parents=True, exist_ok=True)   # ensure dir exists at startup
 app.mount("/pages", StaticFiles(directory=str(_STORAGE_DIR)), name="pages")
+
+# --------------------------------------------------------------------
+# WEB UI — Jinja templates + the design-system stylesheets.
+# Jinja2 is already present as a Starlette dependency, so this adds no new
+# package (CODING_RULES §6.1).  Both are path-resolution only at import: no
+# I/O, no network, nothing that would breach import-time purity.
+# --------------------------------------------------------------------
+_UI_DIR = Path(__file__).resolve().parent
+app.mount("/static", StaticFiles(directory=str(_UI_DIR / "static")), name="static")
+templates = Jinja2Templates(directory=str(_UI_DIR / "templates"))
+
+
+@app.get("/", include_in_schema=False)
+def landing_page(request: Request):
+    """Marketing page.  Reads the corpus size from the already-warm index.
+
+    ``rag.chunks`` is forced by the lifespan handler, so this is a length check
+    on a loaded list rather than a load.  When the index is degraded it is
+    empty, and the page shows a dash instead of claiming zero passages.
+    """
+    count = len(rag.chunks) if isinstance(rag.chunks, list) else 0
+    return templates.TemplateResponse(
+        request=request,
+        name="landing.html",
+        context={"chunk_count": f"{count:,}" if count else "\u2014"},
+    )
+
+
+@app.get("/chat", include_in_schema=False)
+def chat_page(request: Request):
+    """The ask interface.  Posts to /ask from the same origin, so the browser
+    never needs HARRISON_CORS_ORIGINS to be set."""
+    return templates.TemplateResponse(
+        request=request,
+        name="chat.html",
+        context={"max_query_chars": MAX_QUERY_CHARS},
+    )
+
 
 SMART_SUMMARY_K = int(os.getenv("SMART_SUMMARY_K", "48"))
 SMART_SUMMARY_FINAL_K = int(os.getenv("SMART_SUMMARY_FINAL_K", "12"))
