@@ -488,7 +488,9 @@ def ask_question(req: QueryRequest, request: Request) -> QueryResponse:
                 "answer clinical questions about diseases, diagnosis, treatment, and "
                 "pharmacology. Please rephrase your query as a medical question."
             ),
-            confidence="High",   # Highly confident this is out of scope.
+            # No chunks retrieved on this path — calculate_confidence()'s own
+            # guard clause floors that to "Low" instead of hardcoding a value.
+            confidence=calculate_confidence([], "", ""),
             sources=[],
             visual_context=[],
             timings=timings,
