@@ -403,6 +403,32 @@ httpx            ← required by fastapi.testclient
 ruff
 ```
 
+### 6.1b Vendored Browser Assets
+
+`backend/api/static/vendor/` holds third-party code that runs in the *browser*,
+not in Python. It is served as a static asset and is never imported by anything
+under `backend/`, so it does not belong in `backend/requirements.txt` and 6.2's
+pip audit does not apply to it.
+
+```
+vendor/three/   Three.js — WebGL renderer for the helix hero
+```
+
+It is vendored rather than loaded from a CDN so the page has no third-party
+runtime dependency and no request that can be blocked, stale, or substituted.
+
+Rules that *do* apply:
+
+1. Ship the upstream `LICENSE` alongside the code.
+2. Record provenance, exact version, and upgrade steps in a `README.md` next to
+   it. `vendor/three/README.md` is the reference.
+3. Vendor every file the entry point imports. Three.js splits
+   `three.module.min.js` from `three.core.min.js` as a *relative sibling*
+   import; vendoring only the first is a 404 and a silently blank canvas.
+4. No `?v=` cache-buster on an importmap target. The relative sibling import
+   resolves against the entry point's URL, so a query string would be inherited
+   by one half of the library and not the other.
+
 ### 6.2 Adding a New Dependency
 
 Adding any new dependency requires:

@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field
 # This module imports nothing under backend/ and logs nothing, so it is safe
 # ahead of configure_logging().
 from backend.config import (
+    ASSET_VERSION,
     DEFAULT_K,
     DEFAULT_RERANK_POOL,
     EMBEDDING_DIM,
@@ -52,6 +53,7 @@ from backend.agents.confidence_scorer import answer_declines, calculate_confiden
 from backend.agents.context_router import route_and_sort_context
 from backend.agents.query_optimizer import optimize_query
 from backend.agents.semantic_cache import SemanticCache
+from backend.api.content.hero import HERO_STEPS, RAIL
 from backend.llm.llm import ask_llm, key_manager, llm_router, resolve_models
 from backend.processing.evidence import extract_evidence, extract_sources
 from backend.rendering.page_resolver import resolve_page_urls
@@ -226,6 +228,23 @@ app.mount("/static", StaticFiles(directory=str(_UI_DIR / "static")), name="stati
 templates = Jinja2Templates(directory=str(_UI_DIR / "templates"))
 
 
+def _static(path: str) -> str:
+    """Root-relative URL for a static asset, cache-busted by ASSET_VERSION.
+
+    Deliberately not Starlette's ``url_for``: that returns an *absolute* URL
+    including scheme and host, so behind a TLS-terminating proxy that does not
+    set ``X-Forwarded-Proto`` every asset comes back ``http://`` on an
+    ``https://`` page and the browser blocks it as mixed content.  A
+    root-relative path cannot have that failure mode and cache-busts the same.
+
+    Must not be used for the importmap target — see the note in landing.html.
+    """
+    return f"/static/{path}?v={ASSET_VERSION}"
+
+
+templates.env.globals["static"] = _static
+
+
 @app.get("/", include_in_schema=False)
 def landing_page(request: Request):
     """Marketing page.  Reads the corpus size from the already-warm index.
@@ -238,7 +257,11 @@ def landing_page(request: Request):
     return templates.TemplateResponse(
         request=request,
         name="landing.html",
-        context={"chunk_count": f"{count:,}" if count else "\u2014"},
+        context={
+            "chunk_count": f"{count:,}" if count else "\u2014",
+            "hero_steps": HERO_STEPS,
+            "rail": RAIL,
+        },
     )
 
 

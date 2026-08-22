@@ -21,7 +21,7 @@ a{color:var(--accent-600)}
 .brand span{font:500 10px/1 var(--mono);color:var(--ink-300);
   text-transform:uppercase;letter-spacing:.1em}
 .nav nav{margin-left:auto;display:flex;align-items:center;gap:var(--s6)}
-/* :not(.btn) is load-bearing — this selector outranks .btn{color:#fff}, and
+/* :not(.btn) is load-bearing — this selector outranks .btn's own colour, and
    without it the CTA inherits ink-500 on accent-600: 1.45:1. */
 .nav nav a:not(.btn){color:var(--ink-500);text-decoration:none;font-size:14px;
   transition:color var(--fast)}
@@ -30,7 +30,7 @@ a{color:var(--accent-600)}
 /* ── buttons ─────────────────────────────────────────────────────── */
 .btn{display:inline-flex;align-items:center;justify-content:center;gap:var(--s2);
   min-height:44px;padding:0 var(--s6);border:0;border-radius:var(--r-sm);
-  background:var(--accent-600);color:#fff;font:600 15px/1 var(--sans);
+  background:var(--accent-600);color:var(--btn-ink);font:600 15px/1 var(--sans);
   text-decoration:none;cursor:pointer;transition:background var(--fast)}
 .btn:hover{background:var(--accent-700)}
 .btn[disabled]{opacity:.5;cursor:not-allowed}
@@ -75,7 +75,7 @@ a{color:var(--accent-600)}
 
 /* The lean.  Max 2deg — a sheet of paper being handled, not a card flipping.
    .answer is deliberately absent: it is a document, and documents lie flat. */
-.motion .step,.motion .close,.motion .demo .ans,.motion .scan{
+.motion .close,.motion .demo .ans,.motion .scan{
   transform:perspective(900px)
     rotateX(calc(var(--ty,0) * -4deg))
     rotateY(calc(var(--tx,0) * 4deg));
@@ -84,15 +84,15 @@ a{color:var(--accent-600)}
 /* The sheen: a warm patch tracking the pointer across the card face.  These
    cards are #FFFFFF, so "light" cannot be lighter — the lamp reads as a faint
    oxblood warmth instead, at .05 alpha, which is felt more than seen. */
-.motion .step,.motion .close,.motion .demo .ans,.motion .answer,.motion .scan{
+.motion .close,.motion .demo .ans,.motion .answer,.motion .scan{
   position:relative}
-.motion .step::after,.motion .close::after,.motion .demo .ans::after,
+.motion .close::after,.motion .demo .ans::after,
 .motion .answer::after,.motion .scan::after{
   content:"";position:absolute;inset:0;pointer-events:none;
   border-radius:inherit;opacity:0;transition:opacity 220ms ease;
   background:radial-gradient(240px circle at var(--lx,50%) var(--ly,50%),
     rgba(139,38,53,.05),transparent 62%)}
-.motion .step:hover::after,.motion .close:hover::after,
+.motion .close:hover::after,
 .motion .demo .ans:hover::after,.motion .answer:hover::after,
 .motion .scan:hover::after{opacity:1}
 

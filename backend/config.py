@@ -1,4 +1,5 @@
 import os
+import time
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -54,3 +55,19 @@ LLM_PROVIDER_COOLDOWN_SECONDS = float(os.getenv("LLM_PROVIDER_COOLDOWN_SECONDS",
 LLM_TOTAL_REQUEST_BUDGET_SECONDS = float(
     os.getenv("LLM_TOTAL_REQUEST_BUDGET_SECONDS", "90")
 )
+
+# --------------------------------------------------------------------
+# Static asset cache-busting.  Appended to every /static URL a template
+# emits, so a deploy invalidates the browser cache without a filename hash
+# or a build step.
+#
+# The per-boot fallback only changes when the process restarts, so an edited
+# stylesheet keeps its cached URL and a browser reload will NOT pick it up.
+# Restart uvicorn after a CSS edit; a stale site.css cost real debugging time
+# during the UI build precisely because a reload looked like it should work.
+#
+# Pure computation at import: no I/O, no network (ARCHITECTURE §"import-time
+# purity").  It reads an env var, which is why it lives here with the other
+# os.getenv calls rather than at a call site.
+# --------------------------------------------------------------------
+ASSET_VERSION = os.getenv("HARRISON_ASSET_VERSION") or str(int(time.time()))

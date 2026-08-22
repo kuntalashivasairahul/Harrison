@@ -21,7 +21,7 @@
   const root = document.documentElement;
   root.classList.add('motion');
 
-  const CARD = '.step,.close,.demo .ans,.answer,.scan';
+  const CARD = '.close,.demo .ans,.answer,.scan';
   const MAGNET = 4;    // px a button leans toward the pointer
   const LOUPE = 168;   // px diameter, must match .loupe in site.css
   const ZOOM = 2.6;

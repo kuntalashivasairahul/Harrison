@@ -2,14 +2,15 @@
 {% block title %}HarrisonGPT — grounded answers from Harrison's Principles of Internal Medicine{% endblock %}
 
 {% block head %}
+{# The importmap must appear before the first module script in the document, and
+   there may be only one per page.  Deliberately no ?v= cache-buster on the
+   target: three.module.min.js imports "./three.core.min.js" relative to its own
+   resolved URL, so a query here would be inherited by one half of three and not
+   the other.  Provenance and upgrade steps: static/vendor/three/README.md. #}
+<script type="importmap">
+{"imports":{"three":"/static/vendor/three/three.module.min.js"}}
+</script>
 <style>
-.hero{padding:var(--s16) 0 var(--s12)}
-.hero h1{font:600 clamp(30px,5vw,46px)/1.15 var(--sans);color:var(--ink-900);
-  letter-spacing:-.02em;margin:0 0 var(--s4);max-width:19ch}
-.hero .lede{font:19px/30px var(--serif);color:var(--ink-700);max-width:56ch;
-  margin:0 0 var(--s8)}
-.hero .cta{display:flex;gap:var(--s3);flex-wrap:wrap;align-items:center}
-.hero .cta small{color:var(--ink-300);font-size:13px}
 
 .stat{display:flex;gap:var(--s8);flex-wrap:wrap;margin-top:var(--s12);
   padding-top:var(--s6);border-top:1px solid var(--ink-100)}
@@ -42,15 +43,6 @@ h2{font:600 26px/34px var(--sans);color:var(--ink-900);letter-spacing:-.01em;
 .demo .scan .cap{font:500 11px/16px var(--mono);color:var(--ink-300);
   padding:7px 9px;border-top:1px solid var(--ink-100)}
 
-.steps{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));
-  gap:var(--s3);counter-reset:s}
-.step{background:var(--surface);border:1px solid var(--ink-100);
-  border-radius:var(--r-md);padding:var(--s6)}
-.step::before{counter-increment:s;content:counter(s,decimal-leading-zero);
-  font:500 11px/16px var(--mono);color:var(--ink-300);display:block;
-  margin-bottom:var(--s3)}
-.step h3{font:600 16px/24px var(--sans);color:var(--ink-900);margin:0 0 var(--s2)}
-.step p{margin:0;font-size:14px;line-height:21px;color:var(--ink-500)}
 
 .limits{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));
   gap:var(--s6);margin-top:var(--s6)}
@@ -66,26 +58,18 @@ h2{font:600 26px/34px var(--sans);color:var(--ink-900);letter-spacing:-.01em;
 .close h2{margin:0 auto var(--s4);max-width:24ch}
 .close .sub{margin:0 auto var(--s6)}
 </style>
+<link rel="stylesheet" href="{{ static('hero.css') }}">
 {% endblock %}
 
 {% block content %}
+{% include "partials/hero.html" %}
+
 <div class="wrap">
 
-  <div class="hero">
-    <h1>Every answer points back to the page it came from.</h1>
-    <p class="lede">A reference assistant that reads <em>Harrison's Principles of
-    Internal Medicine</em> and cites it — not from memory, but from the retrieved
-    text, with the scanned page one click away.</p>
-    <div class="cta">
-      <a class="btn" href="/chat">Try it now</a>
-      <a class="btn ghost" href="#how">How it works</a>
-      <small>No sign-up.</small>
-    </div>
-    <div class="stat">
-      <div><b>{{ chunk_count }}</b><span>Indexed passages</span></div>
-      <div><b>Hybrid</b><span>Vector + BM25 + rerank</span></div>
-      <div><b>Verified</b><span>Second-pass check</span></div>
-    </div>
+  <div class="stat">
+    <div><b>{{ chunk_count }}</b><span>Indexed passages</span></div>
+    <div><b>Hybrid</b><span>Vector + BM25 + rerank</span></div>
+    <div><b>Verified</b><span>Second-pass check</span></div>
   </div>
 
   <section id="cites">
@@ -109,23 +93,6 @@ h2{font:600 26px/34px var(--sans);color:var(--ink-900);letter-spacing:-.01em;
     </div>
   </section>
 
-  <section id="how">
-    <h2>How an answer gets made</h2>
-    <p class="sub">Five stages. Retrieval happens before generation, so the model
-    writes from retrieved text rather than recall.</p>
-    <div class="steps">
-      <div class="step"><h3>Expand</h3><p>Acronyms resolved and clinical framing
-        added. Non-medical questions stop here.</p></div>
-      <div class="step"><h3>Retrieve</h3><p>Dense vector search and BM25 run in
-        parallel, then fuse.</p></div>
-      <div class="step"><h3>Rerank</h3><p>A cross-encoder scores each passage
-        against your question. Weak matches are dropped outright.</p></div>
-      <div class="step"><h3>Draft</h3><p>The answer is written from the surviving
-        passages only, citing each page it uses.</p></div>
-      <div class="step"><h3>Verify</h3><p>A second pass checks every claim against
-        the same passages before you see it.</p></div>
-    </div>
-  </section>
 
   <section id="limits">
     <h2>What it will not do</h2>
@@ -171,3 +138,7 @@ h2{font:600 26px/34px var(--sans);color:var(--ink-900);letter-spacing:-.01em;
 
 </div>
 {% endblock %}
+
+{# type="module" is what makes the importmap above apply.  Also deferred by
+   default, so it cannot block first paint. #}
+{% block scripts %}<script type="module" src="{{ static('helix/controller.js') }}"></script>{% endblock %}
