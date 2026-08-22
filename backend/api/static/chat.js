@@ -187,6 +187,11 @@
   }
 
   const REFUSAL = 'Insufficient information in the provided context.';
+  // Mirrors SMART_SUMMARY_ACK in backend/llm/llm.py — the backend prefixes
+  // every smart_summary answer with this line so callers can detect a valid
+  // response; it's a wire-protocol marker, not answer content, so it's
+  // stripped before render rather than shown to the user.
+  const SMART_SUMMARY_ACK = 'Topic received — generating Harrison Smart Summary.';
 
   function show(query, r) {
     echoEl.textContent = query;
@@ -196,15 +201,17 @@
     confEl.className = 'conf conf-' + (dots ? level : 'low');
     confEl.innerHTML = `<i>${dots}</i>${esc(r.confidence || 'Pending')} confidence`;
 
+    const answer = (r.answer || '').replace(SMART_SUMMARY_ACK, '').trim();
+
     // The refusal is a state of its own, rendered verbatim and unsoftened.
-    if ((r.answer || '').trim() === REFUSAL) {
+    if (answer === REFUSAL) {
       doc.innerHTML =
         '<div class="refusal"><div class="k">No grounded answer</div>' +
         `<p>${esc(REFUSAL)}</p>` +
         '<p class="why">The retrieved passages did not support an answer, so none ' +
         'was written. Rephrasing may help; inventing a citation would not.</p></div>';
     } else {
-      doc.innerHTML = render(r.answer || '');
+      doc.innerHTML = render(answer);
     }
 
     // page rail
