@@ -121,6 +121,15 @@ a{color:var(--accent-600)}
     animation-iteration-count:1!important;transition-duration:.01ms!important}
 }
 
+/* WCAG 2.5.8 wants a 24px minimum target.  A 14px link is 22px tall on its
+   own, so nav and footer links buy the difference with padding.
+   :not(.btn) is load-bearing for the same reason it is on the colour rule
+   above: this selector outranks .btn's own display:inline-flex, and .nav nav
+   is a flex container, so inline-block blockifies to block — which makes
+   .btn's align-items:center inert and drops the label to the top of the box. */
+.nav nav a:not(.btn),.foot a:not(.btn){padding:var(--s1) 0;display:inline-block}
+.brand{padding:var(--s2) 0}  /* same reason: 17px wordmark is under the minimum */
+
 /* ── narrow viewports ─────────────────────────────────────────────
    The nav is a single flex row and overflows below ~620px, which gives the
    whole page a horizontal scrollbar.  The section anchors are the part that
@@ -142,8 +151,3 @@ a{color:var(--accent-600)}
 @media(max-height:500px) and (orientation:landscape){
   .nav{position:static}
 }
-
-/* WCAG 2.5.8 wants a 24px minimum target.  A 14px link is 22px tall on its
-   own, so nav and footer links buy the difference with padding. */
-.nav nav a,.foot a{padding:var(--s1) 0;display:inline-block}
-.brand{padding:var(--s2) 0}  /* same reason: 17px wordmark is under the minimum */
