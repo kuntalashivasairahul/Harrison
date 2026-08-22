@@ -28,6 +28,12 @@
   function inline(s) {
     return s
       .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+      // The model sometimes groups multiple pages in one bracket, e.g.
+      // "[p:1079, p:1080]", even though the prompt asks for one marker per
+      // claim. Split those into separate brackets so the single-citation
+      // rules below handle each page as its own chip.
+      .replace(/\[((?:p:\d+(?:\|c:\d+)?\s*,\s*)+p:\d+(?:\|c:\d+)?)\]/g,
+        (_, group) => group.split(/\s*,\s*/).map((c) => `[${c}]`).join(''))
       // The model copies the marker format out of the retrieved context, which
       // carries a chunk id: [p:411|c:2197].  It sometimes emits the bare
       // [p:411] the prompt asks for.  Both forms have to render.
