@@ -11,7 +11,10 @@ Both are now deferred to first use, or to explicit startup warm-up.
 """
 from __future__ import annotations
 
+import importlib
+import os
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from backend.llm import llm
@@ -132,6 +135,50 @@ class TestEncoderIsLazy(unittest.TestCase):
         with patch.object(embeddings, "get_model", return_value=fake):
             embeddings.embed_text("acute pancreatitis")
         fake.encode.assert_called_once()
+
+
+class TestDotenvIsLoadedOnceAndFirst(unittest.TestCase):
+    """``backend/.env`` is read in exactly one place, above every env read.
+
+    It used to be read in ``backend/llm/llm.py`` and
+    ``backend/agents/query_optimizer.py``.  llm.py imported ``backend.config``
+    on line 14 and only called ``load_dotenv`` on line 23, so any entry point
+    whose first backend import was ``backend.llm.llm`` evaluated config's
+    ``os.getenv`` block against an environment the .env file had never touched
+    -- every ``LLM_*_SECONDS`` setting silently took its default.  Nothing
+    caught it because query_optimizer happened to load the file first and the
+    API entry point happened to import query_optimizer before config.
+    """
+
+    _BACKEND = Path(__file__).resolve().parents[1] / "backend"
+
+    def test_only_config_loads_the_env_file(self):
+        callers = sorted(
+            path.relative_to(self._BACKEND).as_posix()
+            for path in self._BACKEND.rglob("*.py")
+            if "load_dotenv(" in path.read_text()
+        )
+        self.assertEqual(callers, ["config.py"])
+
+    def test_config_loads_the_file_before_it_reads_the_environment(self):
+        source = (self._BACKEND / "config.py").read_text()
+        self.assertLess(source.index("load_dotenv("), source.index("os.getenv("))
+
+    def test_a_value_arriving_from_the_env_file_reaches_config(self):
+        """The ordering, exercised rather than inspected: a setting that exists
+        only in the .env file must be visible to config's own getenv calls."""
+        import backend.config as config
+
+        def fake_load_dotenv(*_args, **_kwargs):
+            os.environ["LLM_DRAFT_DEADLINE_SECONDS"] = "12.5"
+
+        with patch.dict(os.environ, {}, clear=False), patch("dotenv.load_dotenv", fake_load_dotenv):
+            os.environ.pop("LLM_DRAFT_DEADLINE_SECONDS", None)
+            try:
+                importlib.reload(config)
+                self.assertEqual(config.LLM_DRAFT_DEADLINE_SECONDS, 12.5)
+            finally:
+                importlib.reload(config)
 
 
 if __name__ == "__main__":

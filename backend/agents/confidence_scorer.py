@@ -38,6 +38,8 @@ Design principles
 
 from __future__ import annotations
 
+import re
+
 # ---------------------------------------------------------------------------
 # Thresholds — tune here, not in logic
 # ---------------------------------------------------------------------------
@@ -61,6 +63,63 @@ VERIFICATION_PENALTY_THRESHOLD: float = 0.40
 
 # Minimum chunks required to even consider "High"
 _MIN_CHUNKS_FOR_HIGH: int = 2
+
+
+# ---------------------------------------------------------------------------
+# Declination detection — an answer that refuses is not a confident answer
+# ---------------------------------------------------------------------------
+# The retrieval signals above measure how well the context matched the query.
+# They cannot see the case where retrieval scored respectably, the verifier ran
+# clean, and the model still declined -- because the pages that came back were
+# adjacent to the question rather than about it.  Two live examples, both on
+# the `verified` path where no path-based cap fires:
+#
+#   "The clinical features and management of thyroid storm are not detailed in
+#    the provided chapters of Harrison's ..."           -> shipped Medium
+#   "... the specific diagnostic criteria references are not present in the
+#    provided text."                                    -> shipped Medium
+#
+# Both padded the refusal with true but tangential cited facts, so a
+# citation-presence check does not catch them.  What both do say, plainly, is
+# that the context does not answer the question -- a negation next to a phrase
+# naming the supplied material.  That is the signal.
+_CONTEXT_NOUN = (
+    r"(?:provided|given|supplied|available|retrieved)\s+"
+    r"(?:context|text|chapters?|excerpts?|passages?|source\s+material"
+    r"|material|sources?|content|documents?)"
+)
+_NEGATION = (
+    r"(?:\bnot\b|\bno\b|\bnothing\b|\blacks?\b|\babsent\b"
+    r"|\bunavailable\b|\bsilent\b|\binsufficient\b)"
+)
+# [^.]{0,80} keeps the pair inside one sentence: without it a negation in one
+# sentence pairs with a context noun in the next and any answer that mentions
+# the source material at all trips the rule.
+_DECLINATION_RE = re.compile(
+    rf"(?:{_NEGATION}[^.]{{0,80}}?{_CONTEXT_NOUN})"
+    rf"|(?:{_CONTEXT_NOUN}[^.]{{0,80}}?{_NEGATION})",
+    re.IGNORECASE,
+)
+
+#: Only a declination near the top of the answer governs the whole answer.  A
+#: smart_summary runs several thousand characters and can legitimately note
+#: mid-body that the text omits, say, a dose -- demoting a good summary for one
+#: caveat is the false positive that matters here.  The two live refusals opened
+#: with the declination (offsets 58 and 248); the 6,325-character septic-shock
+#: summary that must stay Medium contains no match at all.
+_DECLINATION_WINDOW_CHARS: int = 300
+
+
+def answer_declines(answer: str) -> bool:
+    """True when the answer opens by saying the context does not answer the question.
+
+    Pure and side-effect free, like everything else in this module, so the
+    caller can apply it as a confidence floor without a second scoring path.
+    """
+    if not answer:
+        return True
+    match = _DECLINATION_RE.search(answer)
+    return match is not None and match.start() < _DECLINATION_WINDOW_CHARS
 
 
 def calculate_confidence(

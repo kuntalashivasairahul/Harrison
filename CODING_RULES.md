@@ -105,6 +105,7 @@ remain so:
 
 ```python
 calculate_confidence(chunks, original_answer, verified_answer) → str
+answer_declines(answer) → bool
 extract_evidence(chunks)  → List[str]
 extract_sources(chunks)   → List[str]
 resolve_page_urls(sources, base_url) → List[Dict[str, str]]

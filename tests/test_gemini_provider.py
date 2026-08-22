@@ -55,9 +55,24 @@ class TestThinkingBudget(unittest.TestCase):
     def test_optimizer_disables_thinking(self):
         self.assertIsNotNone(GeminiProvider._thinking_config(LLMStage.OPTIMIZER))
 
-    def test_draft_keeps_thinking(self):
-        """Synthesis is where reasoning earns its token cost."""
+    def test_draft_keeps_thinking_on_2_x(self):
+        """Synthesis is where reasoning earns its token cost, and 2.5-flash
+        spends it modestly enough to be left alone."""
+        self.assertIsNone(GeminiProvider._thinking_config(LLMStage.DRAFT, "gemini-2.5-flash"))
+
+    def test_unknown_draft_model_is_left_alone(self):
+        """No model name (older call sites, tests) must behave like 2.x."""
         self.assertIsNone(GeminiProvider._thinking_config(LLMStage.DRAFT))
+
+    def test_gemini_3_draft_is_capped_but_still_reasons(self):
+        """A live qa draft on gemini-3-flash-preview returned MAX_TOKENS inside
+        the 3,000-token ceiling: the 3.x default reasoning pass ate the answer's
+        budget.  LOW still reasons (81 tokens probed); MINIMAL would be off."""
+        for model in ("gemini-3-flash-preview", "gemini-3.6-flash", "gemini-3.7-flash"):
+            with self.subTest(model=model):
+                config = GeminiProvider._thinking_config(LLMStage.DRAFT, model)
+                self.assertEqual(config.thinking_level, "LOW")
+                self.assertIsNone(config.thinking_budget)
 
     def test_older_sdk_without_thinking_config_is_tolerated(self):
         """An SDK predating the thinking budget must not break generation."""
@@ -68,7 +83,7 @@ class TestThinkingBudget(unittest.TestCase):
 
 
 class TestGenerateWiring(unittest.TestCase):
-    def _call(self, stage: LLMStage):
+    def _call(self, stage: LLMStage, model: str = "gemini-2.5-flash"):
         response = MagicMock()
         response.usage_metadata.prompt_token_count = 10
         response.usage_metadata.candidates_token_count = 5
@@ -80,14 +95,21 @@ class TestGenerateWiring(unittest.TestCase):
         provider = GeminiProvider(lambda: key_manager, lambda r: ("text", False))
 
         with patch.object(GeminiProvider, "_generate_config", side_effect=lambda **kw: kw):
-            provider.generate(_request(stage), "gemini-2.5-flash")
+            provider.generate(_request(stage), model)
         return client.models.generate_content.call_args.kwargs["config"]
 
     def test_verifier_call_carries_a_thinking_config(self):
         self.assertIn("thinking_config", self._call(LLMStage.VERIFIER))
 
-    def test_draft_call_does_not(self):
+    def test_2_x_draft_call_does_not(self):
         self.assertNotIn("thinking_config", self._call(LLMStage.DRAFT))
+
+    def test_3_x_draft_call_carries_the_cap(self):
+        """The knob has to survive the trip into generate_content(); the two
+        defects this mechanism has already had were both in the wiring, not in
+        the decision."""
+        config = self._call(LLMStage.DRAFT, "gemini-3.6-flash")
+        self.assertEqual(config["thinking_config"].thinking_level, "LOW")
 
     def test_core_generation_params_are_always_passed(self):
         config = self._call(LLMStage.DRAFT)

@@ -1,8 +1,23 @@
 import os
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 # Project root
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+# The one place backend/.env is loaded.  It used to happen in backend/llm/llm.py
+# and backend/agents/query_optimizer.py, both of which sit *below* this module in
+# the import graph -- llm.py imported backend.config on line 14 and only called
+# load_dotenv on line 23, so any entry point whose first backend import was
+# backend.llm.llm evaluated the os.getenv block below against an environment that
+# had never seen the .env file.  Every LLM_*_SECONDS setting silently fell back to
+# its default.  It went unnoticed because query_optimizer happened to load the file
+# before importing this one, and the API entry point happened to import
+# query_optimizer first.  Loading here makes the ordering a property of the import
+# graph rather than a coincidence.  override=False, so a real environment variable
+# still wins over the file.
+load_dotenv(PROJECT_ROOT / "backend" / ".env")
 
 # Artifact paths
 ARTIFACTS_DIR = PROJECT_ROOT / "artifacts"

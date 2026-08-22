@@ -30,17 +30,9 @@ from __future__ import annotations
 import json
 import logging
 import re
-from pathlib import Path
 from typing import TypedDict
 
-from dotenv import load_dotenv
-
-# ---------------------------------------------------------------------------
-# Environment & client setup
-# ---------------------------------------------------------------------------
-
-load_dotenv(Path(__file__).resolve().parents[1] / ".env")
-
+# backend/.env is loaded by backend.config, imported below.
 from backend.config import LLM_OPTIMIZER_DEADLINE_SECONDS
 from backend.llm.contracts import LLMRequest, LLMStage
 from backend.llm.llm import llm_router

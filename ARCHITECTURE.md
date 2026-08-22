@@ -30,7 +30,7 @@ The request lifecycle for `/ask` is:
    `gemini-draft-fallback` on a different Gemini model. A provider-side outage
    on one model no longer fails the request. `KeyManager` uses `GEMINI_API_KEY` plus `GEMINI_API_KEY_1` through `_10` as distinct round-robin projects and temporarily cools down individual projects after quota responses.
 7. Unless `disable_verifier` is requested, `verify_answer()` performs a grounded Gemini rewrite at temperature `0.0`. A complete verified response is the only response eligible for semantic-cache persistence.
-8. `backend/agents/confidence_scorer.py` scores the final response from average cross-encoder relevance and draft-to-verified length divergence; return-path and truncation caps are then applied by the API.
+8. `backend/agents/confidence_scorer.py` scores the final response from average cross-encoder relevance and draft-to-verified length divergence; return-path and truncation caps are then applied by the API, followed by a groundedness floor — an answer with no `[p:NNN]` citation, or one that opens by saying the provided context does not cover the question (`answer_declines()`), is forced to `Low` whatever path produced it.
 9. Source labels are resolved into page-image URLs and returned with timing data in `QueryResponse`.
 
 ---

@@ -115,26 +115,43 @@ class GeminiProvider:
     #: verifier stage in the registry.
     _THINKING_LEVEL_BY_MODEL = {"gemini-3.7-flash": "LOW"}
 
+    #: The draft stage keeps thinking — synthesis is where it earns its cost —
+    #: but only 2.5-flash gets to pick how much.  The 3.x models think far more
+    #: freely at their default, and a live qa draft on gemini-3-flash-preview
+    #: came back finish_reason=MAX_TOKENS inside the 3,000-token QA_MAX_TOKENS
+    #: ceiling: the reasoning pass ate the answer's budget.  LOW is the floor
+    #: that still reasons (81 tokens on 3-flash-preview, per the table above)
+    #: rather than MINIMAL, which is indistinguishable from off.  2.x drafts are
+    #: untouched — the decision to leave them alone predates the 3.x
+    #: deployments and still holds for them.
+    _DRAFT_THINKING_LEVEL = "LOW"
+
     @classmethod
     def _thinking_config(cls, stage: LLMStage, model: str = ""):
+        is_gemini_3 = model.startswith("gemini-3")
+        if stage in cls._NO_THINKING_STAGES:
+            # level=None below means the zero budget: 2.x and anything
+            # unrecognized reject thinking_level, and the zero budget is the
+            # long-standing working default there.
+            level = cls._THINKING_LEVEL_BY_MODEL.get(model, "MINIMAL") if is_gemini_3 else None
+        elif stage is LLMStage.DRAFT and is_gemini_3:
+            level = cls._DRAFT_THINKING_LEVEL
+        else:
+            return None
+
         # Imported at call time, not module scope.  A module-level binding is
         # captured whenever this module happens to be first imported, and one
         # test suite imports it while a stub SDK is installed in sys.modules —
         # the binding then pointed at the stub for the rest of the process and
         # this silently returned None.
-        if stage not in cls._NO_THINKING_STAGES:
-            return None
         from google.genai import types as genai_types
 
         thinking_config_cls = getattr(genai_types, "ThinkingConfig", None)
         if thinking_config_cls is None:
             # Older SDK without a thinking budget knob — nothing to disable.
             return None
-        if not model.startswith("gemini-3"):
-            # 2.x and anything unrecognized: thinking_level is rejected there,
-            # and the zero budget is the long-standing working default.
+        if level is None:
             return thinking_config_cls(thinking_budget=0)
-        level = cls._THINKING_LEVEL_BY_MODEL.get(model, "MINIMAL")
         return thinking_config_cls(thinking_level=level)
 
     @staticmethod

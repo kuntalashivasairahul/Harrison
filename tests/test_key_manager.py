@@ -14,15 +14,21 @@ import time
 import unittest
 from unittest.mock import MagicMock, patch
 
+# Imported here, not inside the tests.  backend/config.py loads backend/.env at
+# import time, so an import nested inside `patch.dict(..., clear=True)` refills
+# the environment the patch just emptied: run this file on its own and the first
+# test to trigger the import saw the developer's nine real keys instead of the
+# two it set.  Importing at module scope spends that side effect during
+# collection, before any patch is active.
+from backend.llm.llm import KeyManager
+
 # ---------------------------------------------------------------------------
 # Helpers to build a KeyManager from arbitrary key lists without env vars
 # ---------------------------------------------------------------------------
 
 def _make_km(*keys: str):
     """Create a KeyManager whose pool is exactly `keys`, bypassing env loading."""
-    from backend.llm.llm import KeyManager
     km = KeyManager.__new__(KeyManager)
-    import threading
     km._lock = threading.Lock()
     km._keys = list(keys)
     km._current_idx = -1
@@ -36,7 +42,14 @@ def _make_km(*keys: str):
 # ---------------------------------------------------------------------------
 
 class TestKeyLoading(unittest.TestCase):
-    """Main Gemini key plus deterministic GEMINI_API_KEY_1..10 loading."""
+    """Main Gemini key plus deterministic GEMINI_API_KEY_1..10 loading.
+
+    These construct a real KeyManager instead of replaying ``__init__`` inline.
+    The hand-rolled copy had drifted from the real thing -- it fell back to
+    GEMINI_API_KEY for slot 1, which production has never done -- so it was
+    asserting behaviour no shipped code had.  The constructor only reads env
+    and logs; it builds no client, so this stays hermetic.
+    """
 
     def test_explicit_slots_loaded_in_order(self):
         env = {
@@ -45,53 +58,20 @@ class TestKeyLoading(unittest.TestCase):
             "GEMINI_API_KEY_2": "key-b",
         }
         with patch.dict("os.environ", env, clear=True):
-            # Re-create a fresh instance (don't reload the module — singleton)
-            from backend.llm.llm import KeyManager
-            km = KeyManager.__new__(KeyManager)
-            import threading
-            km._lock = threading.Lock()
-            km._keys = []
-            km._current_idx = -1
-            km._exhausted = set()
-            # Manually run __init__ body
-            import os
-            for slot in range(1, KeyManager.TOTAL_SLOTS + 1):
-                val = os.getenv(f"GEMINI_API_KEY_{slot}", "").strip()
-                if not val and slot == 1:
-                    val = os.getenv("GEMINI_API_KEY", "").strip()
-                if val:
-                    km._keys.append(val)
+            km = KeyManager()
         self.assertEqual(km._keys, ["key-a", "key-b", "key-c"])
 
     def test_main_key_is_loaded_before_numbered_keys(self):
-        env = {"GEMINI_API_KEY": "bare-key"}
-        with patch.dict("os.environ", env, clear=True):
-            import os
-            import threading
-
-            from backend.llm.llm import KeyManager
-            km = KeyManager.__new__(KeyManager)
-            km._lock = threading.Lock()
-            km._keys = []
-            km._current_idx = -1
-            km._exhausted = set()
-            main_key = os.getenv("GEMINI_API_KEY", "").strip()
-            if main_key:
-                km._keys.append(main_key)
-            for slot in range(1, KeyManager.TOTAL_SLOTS + 1):
-                val = os.getenv(f"GEMINI_API_KEY_{slot}", "").strip()
-                if val:
-                    km._keys.append(val)
+        with patch.dict("os.environ", {"GEMINI_API_KEY": "bare-key"}, clear=True):
+            km = KeyManager()
         self.assertEqual(km._keys, ["bare-key"])
 
     def test_main_key_and_slot_one_are_distinct(self):
         with patch.dict("os.environ", {"GEMINI_API_KEY": "main", "GEMINI_API_KEY_1": "slot-one"}, clear=True):
-            from backend.llm.llm import KeyManager
             km = KeyManager()
         self.assertEqual(km._keys, ["main", "slot-one"])
 
     def test_total_slots_is_10(self):
-        from backend.llm.llm import KeyManager
         self.assertEqual(KeyManager.TOTAL_SLOTS, 10)
 
     def test_empty_slots_skipped_gracefully(self):
@@ -101,25 +81,8 @@ class TestKeyLoading(unittest.TestCase):
             "GEMINI_API_KEY_5": "key-5",
         }
         with patch.dict("os.environ", env, clear=True):
-            import os
-            import threading
-
-            from backend.llm.llm import KeyManager
-            km = KeyManager.__new__(KeyManager)
-            km._lock = threading.Lock()
-            km._keys = []
-            km._current_idx = -1
-            km._exhausted = set()
-            main_key = os.getenv("GEMINI_API_KEY", "").strip()
-            if main_key:
-                km._keys.append(main_key)
-            for slot in range(1, KeyManager.TOTAL_SLOTS + 1):
-                val = os.getenv(f"GEMINI_API_KEY_{slot}", "").strip()
-                if val:
-                    km._keys.append(val)
-        self.assertEqual(len(km._keys), 2)
-        self.assertEqual(km._keys[0], "key-1")
-        self.assertEqual(km._keys[1], "key-5")
+            km = KeyManager()
+        self.assertEqual(km._keys, ["key-1", "key-5"])
 
 
 class TestRoundRobin(unittest.TestCase):

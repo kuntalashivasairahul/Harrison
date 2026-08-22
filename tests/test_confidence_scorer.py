@@ -19,6 +19,7 @@ from backend.agents.confidence_scorer import (
     _HIGH_AVG_SCORE,
     _MED_AVG_SCORE,
     VERIFICATION_PENALTY_THRESHOLD,
+    answer_declines,
     calculate_confidence,
 )
 
@@ -184,6 +185,60 @@ class TestUnscoredChunkHandling(unittest.TestCase):
     def test_non_numeric_score_counts_as_unusable_not_as_a_crash(self):
         chunks = [{"chunk_id": i, "score": -0.2} for i in range(11)] + [{"chunk_id": 9, "score": "oops"}]
         self.assertEqual(calculate_confidence(chunks, "a", "a"), "Medium")
+
+
+class TestAnswerDeclines(unittest.TestCase):
+    """Two live answers scored Medium while telling the reader, in the first
+    breath, that Harrison's text did not answer the question -- one of them
+    while carrying a citation, which is why citation presence alone missed it.
+    """
+
+    def test_the_two_live_refusals_are_recognised(self):
+        for answer in (
+            "The clinical features and management of thyroid storm are not detailed in "
+            "the provided chapters of Harrison's Principles of Internal Medicine. During "
+            "the destructive phase of subacute thyroiditis, uptake is low [p:3074].",
+            "The provided context indicates that the diagnosis of diabetic ketoacidosis "
+            "(DKA) is detailed on page 3217. However, the specific diagnostic criteria "
+            "references are not present in the provided text. The context does note that "
+            "individuals with type 1 diabetes often present with DKA [p:3235].",
+        ):
+            with self.subTest(answer=answer[:40]):
+                self.assertTrue(answer_declines(answer))
+
+    def test_refusal_str_is_a_declination(self):
+        from backend.llm.llm import REFUSAL_STR
+
+        self.assertTrue(answer_declines(REFUSAL_STR))
+
+    def test_an_empty_answer_is_a_declination(self):
+        self.assertTrue(answer_declines(""))
+
+    def test_a_real_answer_that_never_mentions_the_context_is_not(self):
+        self.assertFalse(answer_declines(
+            "Septic shock progresses through compensated, decompensated and irreversible "
+            "stages [p:2349|c:9855]. Management centres on early fluid resuscitation and "
+            "broad-spectrum antibiotics within the first hour [p:2358|c:9889]."
+        ))
+
+    def test_a_mid_body_caveat_in_a_long_summary_is_not_a_refusal(self):
+        """The false positive that would actually cost something: a 6,000-character
+        smart summary is not a refusal because it notes one omission near the end."""
+        summary = (
+            "Septic shock is a distributive shock state driven by dysregulated host "
+            "response to infection [p:2349]. " + "Management is protocolised. " * 60
+            + "The provided text does not specify vasopressor dosing."
+        )
+        self.assertGreater(len(summary), 1500)
+        self.assertFalse(answer_declines(summary))
+
+    def test_a_negation_and_a_context_noun_in_separate_sentences_do_not_pair(self):
+        """Without the sentence guard, any answer mentioning the source material
+        near any negation trips the rule."""
+        self.assertFalse(answer_declines(
+            "Warfarin is not indicated here [p:12]. The provided context covers "
+            "direct oral anticoagulants in detail [p:13]."
+        ))
 
 
 if __name__ == "__main__":

@@ -5,9 +5,7 @@ import logging
 import os
 import threading
 import time
-from pathlib import Path
 
-from dotenv import load_dotenv
 from google import genai
 from google.genai import types  # noqa: F401  (patched by tests)
 
@@ -16,11 +14,6 @@ from backend.llm.contracts import LLMError, LLMErrorCategory, LLMRequest, LLMSta
 from backend.llm.gemini_provider import GeminiProvider
 from backend.llm.router import LLMRouter
 from backend.observability import remaining_budget
-
-# --------------------------------------------------------------------
-# ENV LOADING
-# --------------------------------------------------------------------
-load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
 log = logging.getLogger(__name__)
 

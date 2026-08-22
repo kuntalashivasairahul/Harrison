@@ -16,6 +16,22 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+# backend.config first: it loads backend/.env, and configure_logging() reads
+# HARRISON_LOG_LEVEL from the environment.  Imported the other way round, a log
+# level set in .env was read before the file had been loaded and never applied.
+# This module imports nothing under backend/ and logs nothing, so it is safe
+# ahead of configure_logging().
+from backend.config import (
+    DEFAULT_K,
+    DEFAULT_RERANK_POOL,
+    EMBEDDING_DIM,
+    EMBEDDING_MODEL,
+    LLM_TOTAL_REQUEST_BUDGET_SECONDS,
+    RERANK_MODEL,
+    RERANK_SCORE_THRESHOLD,
+    RRF_K,
+)
+
 # Configure the "backend" logger before importing anything under it, so that
 # diagnostics emitted during module import are captured too.  See
 # backend/logging_config.py for why this is needed under uvicorn.
@@ -31,20 +47,10 @@ configure_logging()
 
 log = logging.getLogger(__name__)
 
-from backend.agents.confidence_scorer import calculate_confidence
+from backend.agents.confidence_scorer import answer_declines, calculate_confidence
 from backend.agents.context_router import route_and_sort_context
 from backend.agents.query_optimizer import optimize_query
 from backend.agents.semantic_cache import SemanticCache
-from backend.config import (
-    DEFAULT_K,
-    DEFAULT_RERANK_POOL,
-    EMBEDDING_DIM,
-    EMBEDDING_MODEL,
-    LLM_TOTAL_REQUEST_BUDGET_SECONDS,
-    RERANK_MODEL,
-    RERANK_SCORE_THRESHOLD,
-    RRF_K,
-)
 from backend.llm.llm import ask_llm, key_manager, llm_router, resolve_models
 from backend.processing.evidence import extract_evidence, extract_sources
 from backend.rendering.page_resolver import resolve_page_urls
@@ -211,7 +217,12 @@ app.mount("/pages", StaticFiles(directory=str(_STORAGE_DIR)), name="pages")
 SMART_SUMMARY_K = int(os.getenv("SMART_SUMMARY_K", "48"))
 SMART_SUMMARY_FINAL_K = int(os.getenv("SMART_SUMMARY_FINAL_K", "12"))
 SMART_SUMMARY_RERANK_POOL = int(os.getenv("SMART_SUMMARY_RERANK_POOL", "16"))
-CACHE_SCHEMA_VERSION = "semantic-cache-v3"
+# Bumped to v4 with the groundedness floor below: a cached entry stores the
+# confidence that was computed when it was written, so the 14 answers already
+# on disk -- including the citation-free thyroid-storm refusal that shipped as
+# Medium -- would keep serving the pre-fix label forever.  The signature is an
+# exact-match gate, so bumping it retires them; they recompute on next ask.
+CACHE_SCHEMA_VERSION = "semantic-cache-v4"
 
 # --------------------------------------------------------------------
 # SEMANTIC CACHE — global singleton, loaded once at startup from disk.
@@ -547,6 +558,8 @@ def ask_question(req: QueryRequest, request: Request) -> QueryResponse:
     #   graceful_fallback + any           → Low max (both layers failed)
     #   no_grounding      + any           → Low max (no usable context)
     #   provider_failure  + any           → Low max (API/quota/outage)
+    #   no [p:NNN] citation + any path    → Low max (answer is not grounded)
+    #   answer declines up front + any path → Low max (it is a refusal)
     #
     # These are the only paths ask_llm() returns; the table previously also
     # handled a "partial_verified" path that nothing ever produced.
@@ -556,6 +569,25 @@ def ask_question(req: QueryRequest, request: Request) -> QueryResponse:
         confidence = "Medium"
     elif was_truncated and confidence == "High":
         confidence = "Medium"
+
+    # The rules above key off the *path*, which says how the answer was produced,
+    # not whether it ended up grounded.  When retrieval brings back plausible but
+    # off-target pages the model declines in its own words -- "The provided
+    # context does not contain information regarding the clinical features or
+    # management of thyroid storm" -- on the `verified` path, where none of the
+    # caps fire.  That shipped as Medium confidence with three Harrison pages and
+    # their thumbnails attached: a refusal dressed as a moderately confident
+    # answer, which is the wrong direction for this system to be wrong in.
+    # An answer carrying no citation is not grounded in the context, whatever
+    # path produced it.  REFUSAL_STR has no citation either and is already Low.
+    #
+    # Citation presence alone is too weak a test, though: re-running the thyroid
+    # storm query live returned "... are not detailed in the provided chapters"
+    # *with* a [p:3074] citation attached to a true but tangential fact about
+    # subacute thyroiditis, and it shipped Medium again.  A padded refusal is
+    # still a refusal, so ask the answer what it says about the context.
+    if "[p:" not in answer or answer_declines(answer):
+        confidence = "Low"
 
     # ── Consolidated request-level structured log (single grep-friendly line) ──
     log.info(

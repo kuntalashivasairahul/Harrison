@@ -250,13 +250,13 @@ class TestAskEndpoint(_ApiTestCase):
 class TestConfidenceCaps(_ApiTestCase):
     """The rule table that stops a degraded answer presenting as confident."""
 
-    def _ask(self, returned_path, was_truncated, scored="High"):
+    def _ask(self, returned_path, was_truncated, scored="High", answer="final [p:12]"):
         with patch.object(main, "optimize_query", return_value=_optimized()), \
              patch.object(main, "retrieve", return_value=[{"chunk_id": 1, "page": 1, "text": "t", "score": 0.5}]), \
              patch.object(main, "route_and_sort_context", side_effect=lambda c: c), \
              patch.object(main, "fuse_context", return_value="context " * 20), \
              patch.object(main, "extract_evidence", return_value=[]), \
-             patch.object(main, "ask_llm", return_value=("final", "draft", was_truncated, returned_path)), \
+             patch.object(main, "ask_llm", return_value=(answer, "draft", was_truncated, returned_path)), \
              patch.object(main, "calculate_confidence", return_value=scored):
             return self.client.post("/ask", json={"query": "q"}).json()["confidence"]
 
@@ -277,6 +277,34 @@ class TestConfidenceCaps(_ApiTestCase):
     def test_caps_never_upgrade_a_low_score(self):
         self.assertEqual(self._ask("verified", False, scored="Low"), "Low")
         self.assertEqual(self._ask("draft_fallback", False, scored="Medium"), "Medium")
+
+    def test_an_answer_without_a_citation_is_forced_low(self):
+        """Live regression: asked about thyroid storm, retrieval returned three
+        plausible but off-target pages and the model declined in its own words.
+        returned_path was "verified", so no path-based cap fired and the refusal
+        shipped as Medium confidence with three Harrison pages attached."""
+        refusal = "The provided context does not contain information regarding thyroid storm."
+        self.assertEqual(self._ask("verified", False, answer=refusal), "Low")
+
+    def test_the_citation_rule_outranks_every_other_cap(self):
+        for path in ("verified", "draft_fallback", "no_grounding"):
+            with self.subTest(path=path):
+                self.assertEqual(self._ask(path, False, answer="no citation here"), "Low")
+
+    def test_a_cited_answer_is_untouched_by_the_rule(self):
+        self.assertEqual(self._ask("verified", False, answer="Supported claim [p:2775]."), "High")
+
+    def test_a_cited_refusal_is_still_forced_low(self):
+        """The first version of this cap only checked for a citation.  Re-run
+        live, the thyroid storm query came back declining *and* citing a
+        tangential fact, so it passed the citation check and shipped Medium a
+        second time."""
+        padded = (
+            "The clinical features and management of thyroid storm are not detailed in "
+            "the provided chapters. During the destructive phase of subacute thyroiditis, "
+            "radioactive iodine uptake is low [p:3074]."
+        )
+        self.assertEqual(self._ask("verified", False, answer=padded), "Low")
 
 
 class TestHealthEndpoint(_ApiTestCase):
