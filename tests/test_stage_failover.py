@@ -30,10 +30,12 @@ def _result(model: str) -> LLMResult:
 #: The Gemini draft chain is one deployment per model, because free-tier quota
 #: is metered per model. Derive it from the registry rather than hardcoding a
 #: length: adding a model must not silently invalidate these tests.
+#: Enabled only -- deployments_for() skips disabled entries, so including one
+#: here asserts an attempt the router will never make.
 _GEMINI_DRAFTS = [
     d.alias
     for d in sorted(load_registry().values(), key=lambda d: d.priority)
-    if LLMStage.DRAFT in d.stages and d.provider == "gemini"
+    if LLMStage.DRAFT in d.stages and d.provider == "gemini" and d.enabled
 ]
 
 
@@ -104,31 +106,36 @@ class TestMistralDraftFailover(unittest.TestCase):
         return router
 
     def test_every_gemini_draft_rate_limited_falls_through_to_mistral(self):
+        # Mistral is now promoted to mid-tier (priority 15, between primary and fallback).
+        # It attempts after primary fails but before fallback and other Gemini models.
         router = self._router([
-            *_gemini_429s(),
+            LLMError(LLMErrorCategory.RATE_LIMITED, "429 quota"),  # gemini-primary fails
             LLMResult(text="answer", provider="mistral", model="mistral-large-latest"),
         ])
         with patch.dict(os.environ, {"MISTRAL_ENABLED": "true", "GROQ_ENABLED": "true"}, clear=False):
             result = router.generate_for_stage(_request(LLMStage.DRAFT), LLMStage.DRAFT)
 
         self.assertEqual(result.provider, "mistral")
-        self.assertEqual(router.attempted, [*_GEMINI_DRAFTS, "mistral-draft"])
+        self.assertEqual(router.attempted, ["gemini-primary", "mistral-draft"])
 
     def test_groq_still_catches_a_mistral_outage(self):
-        """Mistral is tried before Groq, so Groq is only reachable if the chain
-        continues past a Mistral failure."""
+        """Mistral is now mid-tier (priority 15, tried early), so Groq is only
+        reachable if the chain continues past Mistral and all Gemini fallbacks."""
         router = self._router([
-            *_gemini_429s(),
-            LLMError(LLMErrorCategory.UNAVAILABLE, "503"),
+            LLMError(LLMErrorCategory.RATE_LIMITED, "429"),  # gemini-primary
+            LLMError(LLMErrorCategory.UNAVAILABLE, "503"),   # mistral-draft
+            LLMError(LLMErrorCategory.RATE_LIMITED, "429"),  # gemini-draft-fallback
+            LLMError(LLMErrorCategory.RATE_LIMITED, "429"),  # gemini-flash-3.6
+            LLMError(LLMErrorCategory.RATE_LIMITED, "429"),  # gemini-flash-3
             LLMResult(text="answer", provider="groq", model="openai/gpt-oss-120b"),
         ])
         with patch.dict(os.environ, {"MISTRAL_ENABLED": "true", "GROQ_ENABLED": "true"}, clear=False):
             result = router.generate_for_stage(_request(LLMStage.DRAFT), LLMStage.DRAFT)
 
         self.assertEqual(result.provider, "groq")
-        self.assertEqual(
-            router.attempted, [*_GEMINI_DRAFTS, "mistral-draft", "groq-draft"]
-        )
+        # Mistral gets tried early (priority 15), so Groq comes later after all Gemini options exhaust.
+        self.assertIn("mistral-draft", router.attempted)
+        self.assertEqual(router.attempted[-1], "groq-draft")
 
     def test_mistral_is_skipped_when_disabled(self):
         router = self._router([
@@ -140,12 +147,14 @@ class TestMistralDraftFailover(unittest.TestCase):
 
         self.assertNotIn("mistral-draft", router.attempted)
 
-    def test_mistral_is_never_offered_the_verifier_stage(self):
+    def test_mistral_now_serves_the_verifier_stage(self):
+        # Mistral is now promoted to serve both DRAFT and VERIFIER as a hedge
+        # against Gemini quota exhaustion (gemini rate limits are unstable).
         router = self._router([_result("prod-model")])
         with patch.dict(os.environ, {"MISTRAL_ENABLED": "true"}, clear=False):
             aliases = [d.alias for d in router.deployments_for(LLMStage.VERIFIER)]
 
-        self.assertNotIn("mistral-draft", aliases)
+        self.assertIn("mistral-draft", aliases)
 
 
 class TestGroqDraftFailover(unittest.TestCase):
@@ -270,6 +279,64 @@ class TestRetiredModelFailover(unittest.TestCase):
         result = router.generate_for_stage(_request(LLMStage.DRAFT), LLMStage.DRAFT)
         self.assertEqual(result.model, "draft-fallback-model")
         self.assertEqual(router.attempted, ["gemini-primary", "gemini-draft-fallback"])
+
+
+class TestTruncationEscalation(unittest.TestCase):
+    """A truncated answer is a successful call, so it used to end the stage.
+
+    The live symptom: a draft came back cut mid-sentence with six healthy
+    deployments untried, and ask_llm() stapled a truncation notice to the stump
+    and returned it.
+    """
+
+    @staticmethod
+    def _truncated(model: str, text: str = "half an ans") -> LLMResult:
+        return LLMResult(text=text, provider="gemini", model=model, finish_reason="MAX_TOKENS")
+
+    def test_a_truncated_draft_escalates_to_the_next_deployment(self):
+        router = _Router([self._truncated("prod-model"), _result("draft-fallback-model")])
+        result = router.generate_for_stage(_request(LLMStage.DRAFT), LLMStage.DRAFT)
+        self.assertEqual(result.model, "draft-fallback-model")
+        self.assertFalse(result.truncated)
+        self.assertEqual(router.attempted, ["gemini-primary", "gemini-draft-fallback"])
+
+    def test_openai_style_length_escalates_too(self):
+        """Mistral and Groq say "length"; only Gemini says MAX_TOKENS."""
+        router = _Router([
+            LLMResult(text="half", provider="gemini", model="prod-model", finish_reason="LENGTH"),
+            _result("draft-fallback-model"),
+        ])
+        result = router.generate_for_stage(_request(LLMStage.DRAFT), LLMStage.DRAFT)
+        self.assertEqual(result.model, "draft-fallback-model")
+
+    def test_all_truncated_returns_the_longest_partial(self):
+        """Half an answer still beats a hard failure — but return the best half."""
+        # One length per enabled deployment, longest deliberately in the middle
+        # so the winner is chosen by length rather than by position. Sized off
+        # the chain: a fixed tuple broke the moment a deployment was disabled.
+        lengths = [10 * (i + 1) for i in range(len(_GEMINI_DRAFTS))]
+        lengths[len(lengths) // 2] = 400
+        router = _Router([
+            self._truncated(alias, text="x" * length)
+            for alias, length in zip(_GEMINI_DRAFTS, lengths, strict=True)
+        ])
+        with patch.dict(os.environ, {"MISTRAL_ENABLED": "false", "GROQ_ENABLED": "false"}, clear=False):
+            result = router.generate_for_stage(_request(LLMStage.DRAFT), LLMStage.DRAFT)
+
+        self.assertEqual(len(result.text), max(lengths))
+        self.assertTrue(result.truncated)
+        self.assertEqual(router.attempted, _GEMINI_DRAFTS)
+
+    def test_a_partial_answer_wins_over_a_later_hard_failure(self):
+        """Truncated first, then a non-fallback-eligible error that breaks the
+        loop. The partial is still worth more to the caller than the exception."""
+        router = _Router([
+            self._truncated("prod-model"),
+            LLMError(LLMErrorCategory.INVALID_REQUEST, "400 bad request"),
+        ])
+        result = router.generate_for_stage(_request(LLMStage.DRAFT), LLMStage.DRAFT)
+        self.assertEqual(result.model, "prod-model")
+        self.assertTrue(result.truncated)
 
 
 class TestModelSlots(unittest.TestCase):
