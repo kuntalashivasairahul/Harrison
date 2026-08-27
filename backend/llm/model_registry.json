@@ -140,10 +140,10 @@
         "verifier"
       ],
       "max_input_tokens": 100000,
-      "max_output_tokens": 32768,
+      "max_output_tokens": 8192,
       "timeout_seconds": 20,
       "privacy": "configured_external_provider",
-      "priority": 24
+      "priority": 27
     }
   ]
 }

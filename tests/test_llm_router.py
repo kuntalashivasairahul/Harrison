@@ -71,6 +71,19 @@ class TestRegistry(unittest.TestCase):
             if LLMStage.VERIFIER in deployment.stages:
                 self.assertNotEqual(deployment.provider, "groq", deployment.alias)
 
+    def test_every_gemini_verifier_outranks_the_mistral_verifier(self) -> None:
+        """CODING_RULES §6.1 as amended: Gemini is the *preferred* verifier and
+        Mistral is the hedge that engages when Gemini is unavailable. At
+        priority 24 mistral-verifier contradicted that, sitting ahead of two
+        Gemini verifiers, and it cost 20s of a 69s request on 2026-08-27 --
+        mistral-medium-latest hit its own 20s ceiling and returned nothing,
+        then gemini-flash-3.6 verified the same answer in 6.7s."""
+        registry = load_registry()
+        mistral = registry["mistral-verifier"].priority
+        for deployment in registry.values():
+            if LLMStage.VERIFIER in deployment.stages and deployment.provider == "gemini":
+                self.assertLess(deployment.priority, mistral, deployment.alias)
+
     def test_every_draft_model_has_an_independent_verifier_available(self) -> None:
         """Self-verification is forbidden, so excluding the drafter must never
         empty the verifier stage -- otherwise a model that drafts can only be

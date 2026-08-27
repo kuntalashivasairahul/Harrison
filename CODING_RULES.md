@@ -437,7 +437,8 @@ outage — the rule was protecting the mechanism into uselessness.
 - Gemini remains the *preferred* verifier by priority order; a non-Gemini
   verifier is a fallback that engages when the Gemini deployments ahead of it
   are unavailable, not a co-equal default. Mistral's verifier is
-  `mistral-verifier` (`mistral-medium-latest`, 20s), not the slower
+  `mistral-verifier` (`mistral-medium-latest`, 20s, priority 27 — behind
+  every Gemini verifier, per the paragraph above), not the slower
   `mistral-large-latest` that serves the draft: that model was measured at
   23-30s live and hit its own 30s ceiling once, and the ceiling cannot be
   raised because §6.1's budget invariant caps a draft at a third of

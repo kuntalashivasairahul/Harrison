@@ -257,9 +257,17 @@ The **verifier** stage falls over the same way, minus Groq and minus
 |---|---|---|---|
 | 10 | `gemini-primary` | Gemini | always tried first |
 | 20 | `gemini-draft-fallback` | Gemini | primary returned a fallback-eligible error |
-| 24 | `mistral-verifier` | Mistral | both Gemini verifiers failed |
-| 25 | `gemini-flash-3.6` | Gemini | Mistral also failed |
+| 25 | `gemini-flash-3.6` | Gemini | both of the above failed |
 | 26 | `gemini-flash-3` | Gemini | as above |
+| 27 | `mistral-verifier` | Mistral | every Gemini verifier failed |
+
+Mistral verifies last, not fourth. It sat at priority 24 for a day, ahead of
+both `gemini-flash-3.x` deployments, and that cost 20s of a 69s request on
+2026-08-27: `mistral-medium-latest` hit its own 20s ceiling and returned
+nothing, then `gemini-flash-3.6` verified the same answer in 6.7s. Ordering it
+last also matches what the rule actually says — Gemini is the preferred
+verifier and Mistral is the hedge for a Gemini-wide outage, which is precisely
+the case where every deployment ahead of it has already failed.
 
 Whichever model served the draft is removed from that order for the request
 that produced it. `mistral-large-latest` drafts but never verifies: it was
