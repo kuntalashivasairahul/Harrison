@@ -4,7 +4,7 @@ This document details the complete end-to-end control flow of HarrisonGPT when a
 
 ---
 
-## 🗺️ High-Level Pipeline Architecture
+## High-Level Pipeline Architecture
 
 The pipeline consists of a pre-retrieval validation & expansion step, a multi-query hybrid retrieval & reranking step, an LLM generation & verification cycle, and post-generation confidence scoring & rendering.
 
@@ -38,7 +38,7 @@ graph TD
 
 ---
 
-## 🤖 LLM Models, Embeddings & Token Metrics
+## LLM Models, Embeddings & Token Metrics
 
 Below is a detailed breakdown of the models, embedding engines, token limits, and hyperparameters utilized throughout the pipeline:
 
@@ -75,7 +75,7 @@ Below is a detailed breakdown of the models, embedding engines, token limits, an
 
 ---
 
-## 📂 Component Map & File Control Flow
+## Component Map & File Control Flow
 
 Below is the directory/file trace mapped to the order of execution:
 
@@ -89,13 +89,13 @@ Below is the directory/file trace mapped to the order of execution:
 | **5** | Evidence Extraction | [evidence.py](file:///Users/shivasairahulkuntala/Developer/AI_Projects/nlp_models/Harrison/backend/processing/evidence.py) | `extract_evidence(chunks)` | Extracts page-cited, highest-yield diagnostic sentences from top-scoring chunks. |
 | **6** | Context Fusion | [fusion.py](file:///Users/shivasairahulkuntala/Developer/AI_Projects/nlp_models/Harrison/backend/utils/fusion.py) | `fuse_context(chunks)` | Cleans HTML artifacts/citations and concatenates texts into a unified prompt context. |
 | **7** | Response Generation | [llm.py](file:///Users/shivasairahulkuntala/Developer/AI_Projects/nlp_models/Harrison/backend/llm/llm.py) | `ask_llm(...)` | Prompts the Gemini production model under a medical constraint system to generate a draft QA or Smart Summary. |
-| **8** | Grounded Verification | [llm.py](file:///Users/shivasairahulkuntala/Developer/AI_Projects/nlp_models/Harrison/backend/llm/llm.py) | `verify_answer(...)` | Performs a secondary Gemini validation pass to correct or redact any draft claim unsupported by raw context. |
+| **8** | Grounded Verification | [llm.py](file:///Users/shivasairahulkuntala/Developer/AI_Projects/nlp_models/Harrison/backend/llm/llm.py) | `verify_answer(...)` | Performs a secondary validation pass -- routed to any verifier deployment except the model that wrote the draft -- to correct or redact any draft claim unsupported by raw context. |
 | **9** | Confidence Assessment | [confidence_scorer.py](file:///Users/shivasairahulkuntala/Developer/AI_Projects/nlp_models/Harrison/backend/agents/confidence_scorer.py) | `calculate_confidence(...)` | Maps reranker scores and verification divergence to a `"High"`, `"Medium"`, or `"Low"` label. |
 | **10** | Image Link Construction | [page_resolver.py](file:///Users/shivasairahulkuntala/Developer/AI_Projects/nlp_models/Harrison/backend/rendering/page_resolver.py) | `resolve_page_urls(sources)` | Accounts for index drifts (offset = 43) and constructs thumbnail & full image preview endpoints. |
 
 ---
 
-## 🔍 Detailed Phase Walkthrough
+## Detailed Phase Walkthrough
 
 ### 1. Request Intake & Validation
 **File:** [main.py](file:///Users/shivasairahulkuntala/Developer/AI_Projects/nlp_models/Harrison/backend/api/main.py)

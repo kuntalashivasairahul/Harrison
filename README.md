@@ -4,9 +4,9 @@ HarrisonGPT is a production-grade, high-recall **Medical Retrieval-Augmented Gen
 
 ---
 
-## 🚀 Key Features
+## Key Features
 
-* **Stage-Aware LLM Routing:** Uses an approved local registry: Groq optimizes queries when explicitly enabled, Gemini drafts and is the **only** verification provider, Mistral and Groq back the draft stage when Gemini is rate-limited, and all provider fallback decisions are logged.
+* **Stage-Aware LLM Routing:** Uses an approved local registry: Groq optimizes queries when explicitly enabled, Gemini drafts and verifies, Mistral and Groq back the draft stage when Gemini is rate-limited, Mistral also backs the verifier stage, no model is ever allowed to verify its own draft, and all provider fallback decisions are logged.
 * **Low-Latency Semantic Caching:** Utilizes a disk-persistent semantic cache (`artifacts/semantic_cache.json`) to serve clinically equivalent queries instantly ($\ge 0.95$ Cosine Similarity) in under ~1ms.
 * **Hybrid Retrieval Pipeline:** Merges FAISS dense search using `BAAI/bge-m3` (1024 dimensions) with BM25Okapi sparse lexical search via Reciprocal Rank Fusion (RRF), alongside local context neighbor chunk expansion.
 * **Cross-Encoder Rerank Filtering:** Scores chunks via an `ms-marco-MiniLM-L-6-v2` cross-encoder, filtering out noisy passages scoring below `-3.0`.
@@ -15,7 +15,7 @@ HarrisonGPT is a production-grade, high-recall **Medical Retrieval-Augmented Gen
 
 ---
 
-## 🛠️ Technology Stack
+## Technology Stack
 
 * **API & Serving:** FastAPI, Uvicorn, Pydantic, Python-dotenv
 * **Vector & Lexical Search:** FAISS (CPU), Rank-BM25
@@ -24,13 +24,13 @@ HarrisonGPT is a production-grade, high-recall **Medical Retrieval-Augmented Gen
 
 ---
 
-## 🗺️ System Control Flow & Architecture
+## System Control Flow & Architecture
 
 For a detailed walkthrough, step-by-step trace, and sequence diagram of how control flows from request intake to response delivery, refer to [workflow.md](workflow.md).
 
 ---
 
-## 💻 Setup & Installation
+## Setup & Installation
 
 ### 1. Prerequisites
 * Python 3.12
@@ -103,7 +103,7 @@ LLM_VERIFIER_DEADLINE_SECONDS=30
 
 ---
 
-## ⚙️ Running Locally
+## Running Locally
 
 Start the ASGI development server from the workspace root:
 ```bash
@@ -133,7 +133,7 @@ index checksums and deliberate rebuild command.
 
 ---
 
-## 🔌 API Documentation
+## API Documentation
 
 ### 1. Ask Endpoint
 * **Path:** `/ask`
@@ -184,7 +184,7 @@ index checksums and deliberate rebuild command.
 
 ---
 
-## 🧪 Evaluation
+## Evaluation
 
 ### Test suite
 
@@ -245,14 +245,53 @@ The **draft** stage falls over in priority order:
 |---|---|---|---|
 | 10 | `gemini-primary` | Gemini | always tried first |
 | 20 | `gemini-draft-fallback` | Gemini | primary returned a fallback-eligible error |
-| 25 | `mistral-draft` | Mistral | both Gemini drafts failed |
-| 30 | `groq-draft` | Groq | Mistral also failed, **and** the prompt fits 5k input tokens |
+| 22 | `mistral-draft` | Mistral | both Gemini drafts failed |
+| 25 | `gemini-flash-3.6` | Gemini | Mistral also failed |
+| 26 | `gemini-flash-3` | Gemini | as above |
+| 30 | `groq-draft` | Groq | everything above failed, **and** the prompt fits 5k input tokens |
 
-**Gemini remains the sole verifier.** A Mistral or Groq draft is still verified
-by Gemini against the same retrieved context, so the grounding and citation
-checks in `verify_answer()` apply unchanged; the failover widens who may write a
-first pass, never who approves it. A non-Gemini entry in the registry carrying
-the `verifier` stage is a test failure, not a review comment.
+The **verifier** stage falls over the same way, minus Groq and minus
+`mistral-draft`:
+
+| Priority | Deployment | Provider | Reached when |
+|---|---|---|---|
+| 10 | `gemini-primary` | Gemini | always tried first |
+| 20 | `gemini-draft-fallback` | Gemini | primary returned a fallback-eligible error |
+| 24 | `mistral-verifier` | Mistral | both Gemini verifiers failed |
+| 25 | `gemini-flash-3.6` | Gemini | Mistral also failed |
+| 26 | `gemini-flash-3` | Gemini | as above |
+
+Whichever model served the draft is removed from that order for the request
+that produced it. `mistral-large-latest` drafts but never verifies: it was
+measured at 23–30s live and hit its own 30s ceiling once, and that ceiling
+cannot be raised — no draft deployment may claim more than a third of the 90s
+request budget, or a cascade runs out of time before it reaches the deployments
+behind the failure. `mistral-medium-latest` does the verifier's job inside 20s,
+and a timeout on the draft stage is cheap because failover continues past it.
+
+`mistral-draft` sits behind `gemini-draft-fallback` on purpose. It briefly ran at
+priority 15, in front of it, and the cost was measured live: a `gemini-primary`
+503 sent the draft straight to `mistral-large-latest`, which takes 23–30s and in
+one request hit its own 30s timeout and produced nothing, while
+`gemini-draft-fallback` served the same draft in 9.7s once it was finally
+reached. `gemini-primary` returning "high demand" says nothing about
+`gemini-3.5-flash` — they are different models — so one Gemini outage is not a
+reason to pay for the slowest deployment in the fleet. Mistral still outranks the
+remaining Gemini drafts, so a Gemini-wide quota failure reaches it quickly.
+
+**No model verifies its own draft.** The verifier stage is open to Gemini and
+Mistral, but the model that actually served the draft is dropped from the
+verifier order at routing time — a model asked to grade its own work is the
+least likely to catch its own ungrounded claim. The exclusion is per *model*,
+not per provider: barring the whole provider would empty the verifier order
+whenever Mistral is dark, trading a self-verified answer for an unverified one.
+If the exclusion does empty the order, the stage fails rather than falling back
+to the drafter; that caps confidence and returns the `draft_fallback` path,
+which is honest, where a self-approved answer labelled `verified` would not be.
+Groq never verifies: its 8k-token-per-minute ceiling means it would grade a
+`smart_summary` draft against a truncated view of the evidence. The grounding
+and citation checks in `verify_answer()` are unchanged. See CODING_RULES §6.1,
+amended 2026-08-27.
 
 Mistral outranks Groq deliberately. Groq's 8k-token-per-minute ceiling means
 `groq-draft` cannot carry a full `smart_summary` prompt at all, so ordering it
@@ -287,3 +326,40 @@ not route textbook context through generic gateway auto-routing or context
 compression — the objection is to an *unknown* downstream provider and
 retention policy, which is why named direct providers are approved and gateways
 are not.
+
+---
+
+## Provenance: built with AI, reviewed by a human
+
+This project was written with substantial help from AI coding assistants, and
+saying so plainly is part of taking it seriously. A system that answers medical
+questions should not be vague about how it was built.
+
+**What that means concretely.** Of the 54 commits in this repository, 20 carry a
+`Co-Authored-By: Claude` trailer — 19 from Claude Opus 5 and one from Claude
+Haiku 4.5. The trailers are in the git history and were not added retroactively;
+`git log --format='%b' | grep Co-Authored-By` reproduces the count. AI wrote or
+substantially edited most of the retrieval pipeline, the LLM router, the test
+suite, and this documentation. The remaining commits are human-authored.
+
+**What "reviewed by a human" means here.** Every change was read and accepted by
+[@kuntalashivasairahul](https://github.com/kuntalashivasairahul) before it
+landed. The design decisions — what the system refuses to answer, where
+confidence is floored, which providers are approved, what stays immutable — are
+human calls, written down in `CODING_RULES.md`, and the AI is held to them
+rather than consulted about them. `CODING_RULES.md` exists precisely because an
+assistant with commit access needs constraints it cannot argue its way out of.
+
+**Where that review has already caught something.** Commit `d5739d9` put Mistral
+on the verifier stage and rewrote the test that guarded against it *without*
+amending the rule that forbade it, so the code and the written rule disagreed
+for a day. That was found by audit, the rule was amended on the evidence rather
+than quietly deleted, and the episode is recorded in `CODING_RULES.md §6.1`
+under "Honest history" instead of being cleaned up. AI assistance does not
+remove the need for review; that commit is the argument for it.
+
+**What this does not claim.** It does not claim the code is correct because a
+human looked at it, and it does not claim the medical content is safe to act on.
+The system is a study aid grounded in one textbook. It refuses rather than
+guesses, cites the pages it used, and is **not a diagnostic device** — the
+footer on every page says so, and that is not boilerplate.

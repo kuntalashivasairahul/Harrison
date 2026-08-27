@@ -911,7 +911,7 @@ def promote_only(no_backup: bool = False) -> None:
 
     log.info("=" * 60)
     log.warning(
-        "⚠️  IMPORTANT: The running uvicorn server may still have the old\n"
+        "IMPORTANT: The running uvicorn server may still have the old\n"
         "    index and chunks in memory and should be restarted after promotion\n"
         "    to activate the new table-aware index.\n\n"
         "    To restart, kill the current uvicorn process, then run:\n"
@@ -1012,7 +1012,7 @@ def save_outputs(
 
     log.info("=" * 60)
     log.warning(
-        "⚠️  IMPORTANT: The running uvicorn server may still have the old\n"
+        "IMPORTANT: The running uvicorn server may still have the old\n"
         "    index and chunks in memory and should be restarted after promotion\n"
         "    to activate the new table-aware index.\n\n"
         "    To restart, kill the current uvicorn process, then run:\n"
@@ -1286,7 +1286,7 @@ def main() -> None:
 
     # ── 8. Final success summary ──────────────────────────────────────────
     log.info("=" * 60)
-    log.info("✅  Ingestion complete.")
+    log.info("Ingestion complete.")
     log.info("   Staging index   : %s", STAGING_INDEX)
     log.info("   Staging chunks  : %s", STAGING_CHUNKS)
     log.info("   Vectors stored  : %d", index.ntotal)
@@ -1298,7 +1298,7 @@ def main() -> None:
     if not args.promote:
         log.info("=" * 60)
         log.info(
-            "ℹ️   Production index at artifacts/vectorstore/ is UNCHANGED.\n"
+            "NOTE: Production index at artifacts/vectorstore/ is UNCHANGED.\n"
             "    To validate, load the staging index and run test queries.\n"
             "    When satisfied, run with --promote to go live:\n"
             "        python scripts/ingest_tables_aware.py --promote"

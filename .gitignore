@@ -42,3 +42,5 @@ artifacts/semantic_cache.json
 .playwright-mcp/
 artifacts/benchmark/
 .claude/settings.local.json
+impeccable/
+.impeccable/

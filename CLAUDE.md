@@ -36,7 +36,7 @@ virtualenv; if you find one, it is a mistake.
 
 ```bash
 ./scripts/setup_env.sh                        # creates .venv312, installs runtime + dev deps
-.venv312/bin/python -m pytest                 # 351 tests, ~5s, fully hermetic
+.venv312/bin/python -m pytest                 # 381 tests, ~5s, fully hermetic
 .venv312/bin/python -m ruff check backend/ tests/
 .venv312/bin/python -m uvicorn backend.api.main:app --reload --host 127.0.0.1 --port 8000
 ```
@@ -118,7 +118,10 @@ and do not let them into general context.
 - **Cached answers store the confidence they were labelled with.** Change the
   confidence rules and the entries already in `artifacts/semantic_cache.json`
   keep serving the old label; bump `CACHE_SCHEMA_VERSION` in `main.py` to retire
-  them.
+  them. Bumping now *deletes* them: `SemanticCache(schema_version=...)` drops
+  entries whose `metadata.schema` differs at load and rewrites the file once.
+  Before that they were loaded, scanned, and re-flushed forever — six of the
+  twenty-one entries on disk were pre-v5.
 - **Deadlines and cooldowns live in `backend/config.py`** and are imported by
   call sites. Do not reintroduce `os.getenv("LLM_..._DEADLINE_SECONDS")` at a
   call site — config and the live values silently drifted apart that way before.
@@ -132,5 +135,16 @@ and do not let them into general context.
   that was 30% of the input budget.
 - Draft/verifier failover exists (`router.generate_for_stage`). Passing an
   explicit `model=` to `ask_llm()` pins one deployment and bypasses it.
+- **No model verifies its own draft.** `ask_llm()` passes the drafting
+  `result.model` to `verify_answer(drafted_by_model=...)`, which reaches
+  `generate_for_stage(exclude_model=...)`. The exclusion is per *model*, not per
+  provider — barring the provider empties the verifier order whenever Mistral is
+  dark, which loses verification entirely. It compares `_resolve_model()`, not
+  `deployment.model`: the Gemini entries carry `dynamic-*` sentinels and a raw
+  comparison silently never matches. CODING_RULES §6.1, amended 2026-08-27.
+- **An outage cools the deployment; a Gemini 429 does not.** `_cooldown()`
+  benches UNAVAILABLE/TIMEOUT for 15s so the verifier stage of the same request
+  does not re-probe a model that just 503'd. Gemini quota stays uncooled because
+  KeyManager rotates keys per project.
 - Anything in `scripts/` is documented in `scripts/README.md`. Check there
   before assuming a script is dead.
