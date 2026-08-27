@@ -75,6 +75,29 @@ class TestMistralProvider(unittest.TestCase):
         self.assertEqual(sent["messages"][0]["role"], "system")
         self.assertEqual(sent["max_tokens"], 512)
 
+    def test_openai_style_length_reads_as_truncated(self) -> None:
+        """Mistral says "length"; only Gemini says MAX_TOKENS.
+
+        Every consumer compared finish_reason against the literal "MAX_TOKENS",
+        so a Mistral draft cut at the ceiling arrived with truncated=False: no
+        truncation notice, no confidence cap, and cached and re-served as High.
+        """
+        for reason in ("length", "model_length"):
+            body = _Response(json.dumps({
+                "id": "req-1",
+                "model": "mistral-large-2411",
+                "choices": [{"message": {"content": "cut off mid-"}, "finish_reason": reason}],
+                "usage": {"prompt_tokens": 100, "completion_tokens": 512},
+            }).encode("utf-8"))
+            with self.subTest(reason=reason), patch("urllib.request.urlopen", return_value=body):
+                result = self.provider.generate(_request(), "mistral-large-latest")
+            self.assertTrue(result.truncated)
+
+    def test_a_natural_stop_is_not_truncated(self) -> None:
+        with patch("urllib.request.urlopen", return_value=_ok_body()):
+            result = self.provider.generate(_request(), "mistral-large-latest")
+        self.assertFalse(result.truncated)
+
     def test_api_key_is_sent_as_a_bearer_token(self) -> None:
         with patch("urllib.request.urlopen", return_value=_ok_body()) as urlopen:
             self.provider.generate(_request(), "mistral-large-latest")

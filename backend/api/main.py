@@ -284,13 +284,13 @@ SMART_SUMMARY_RERANK_POOL = int(os.getenv("SMART_SUMMARY_RERANK_POOL", "16"))
 # on disk -- including the citation-free thyroid-storm refusal that shipped as
 # Medium -- would keep serving the pre-fix label forever.  The signature is an
 # exact-match gate, so bumping it retires them; they recompute on next ask.
-CACHE_SCHEMA_VERSION = "semantic-cache-v4"
+CACHE_SCHEMA_VERSION = "semantic-cache-v5"
 
 # --------------------------------------------------------------------
 # SEMANTIC CACHE — global singleton, loaded once at startup from disk.
 # Provides sub-100ms responses for repeated or near-identical queries.
 # --------------------------------------------------------------------
-_cache = SemanticCache()
+_cache = SemanticCache(schema_version=CACHE_SCHEMA_VERSION)
 
 
 def _vectorstore_fingerprint() -> dict[str, int | None]:
@@ -436,7 +436,7 @@ def ask_question(req: QueryRequest, request: Request) -> QueryResponse:
     start_request_budget(LLM_TOTAL_REQUEST_BUDGET_SECONDS)
 
     # ----------------------------------------------------------------
-    # 0️⃣  Semantic Cache — probed before any LLM call
+    # 0. Semantic Cache — probed before any LLM call
     # ----------------------------------------------------------------
     # This used to sit *behind* the optimizer, so every hit paid a full Groq
     # round-trip (measured 697ms) to look up an answer already on disk.  The
@@ -477,7 +477,7 @@ def ask_question(req: QueryRequest, request: Request) -> QueryResponse:
         )
 
     # ----------------------------------------------------------------
-    # 1️⃣  QueryOptimizer — pre-retrieval gatekeeper & context enhancer
+    # 1. QueryOptimizer — pre-retrieval gatekeeper & context enhancer
     # ----------------------------------------------------------------
     # The agent runs a fast LLM call (llama-3.1-8b-instant) to:
     #   a) Detect whether the query is medical in nature.
@@ -544,7 +544,7 @@ def ask_question(req: QueryRequest, request: Request) -> QueryResponse:
         final_k=dynamic_final_k,
     )
 
-    # 2️⃣ Retrieve (final_k scaled by query complexity)
+    # 2. Retrieve (final_k scaled by query complexity)
     if mode == "smart_summary":
         retrieved_chunks = retrieve(
             search_query,
@@ -560,16 +560,16 @@ def ask_question(req: QueryRequest, request: Request) -> QueryResponse:
             timings=timings,
         )
 
-    # 2.5️⃣ ContextRouter — deduplicate & chronological sort
+    # 2.5. ContextRouter — deduplicate & chronological sort
     # Drops near-identical chunks (>90% overlap) and re-orders survivors
     # by ascending page number so the LLM reads Harrison sequentially.
     # Pure function: no LLM call, sub-millisecond, crash-safe.
     retrieved_chunks = route_and_sort_context(retrieved_chunks)
 
-    # 3️⃣ Fuse context
+    # 3. Fuse context
     fused_context = fuse_context(retrieved_chunks)
 
-    # 4️⃣ Extract structured evidence for the chunks the context could not carry.
+    # 4. Extract structured evidence for the chunks the context could not carry.
     #    Building both blocks from the same list sent every context chunk to the
     #    model twice; excluding them removes the duplication without losing a
     #    single chunk.
@@ -578,7 +578,7 @@ def ask_question(req: QueryRequest, request: Request) -> QueryResponse:
         exclude_chunk_ids=selected_chunk_ids(retrieved_chunks),
     )
 
-    # 5️⃣ Ask LLM
+    # 5. Ask LLM
     #    question= uses raw_query so the answer is phrased naturally for
     #    the user; the enriched context already reflects search_query.
     #    ask_llm() returns a 4-tuple: (final_answer, draft_answer, was_truncated, returned_path).
@@ -596,11 +596,11 @@ def ask_question(req: QueryRequest, request: Request) -> QueryResponse:
     # Phase 3 – populate confidence and sources from scoring pipeline.
     # ----------------------------------------------------------------
 
-    # 6️⃣ Extract unique, sorted page references for the sources field.
+    # 6. Extract unique, sorted page references for the sources field.
     #    Returns [] safely when retrieved_chunks is empty.
     sources: list[str] = extract_sources(retrieved_chunks)
 
-    # 7️⃣ Calculate the deterministic confidence label.
+    # 7. Calculate the deterministic confidence label.
     #    ConfidenceScorer combines two signals:
     #      a) Average Cross-Encoder score across all retrieved chunks
     #         (not just the top-1) for a richer retrieval quality estimate.
@@ -671,7 +671,7 @@ def ask_question(req: QueryRequest, request: Request) -> QueryResponse:
         raw_query,
     )
 
-    # 🔟 Resolve source page labels to image URLs.
+    # 10. Resolve source page labels to image URLs.
     #    base_url is derived from the live Request so this works on any
     #    host/port without hardcoding (localhost, staging, or production).
     base_url: str = str(request.base_url).rstrip("/")

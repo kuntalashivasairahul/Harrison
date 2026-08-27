@@ -16,7 +16,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from backend.llm import llm as llm_mod
-from backend.llm.contracts import LLMError, LLMErrorCategory
+from backend.llm.contracts import LLMError, LLMErrorCategory, LLMResult
 
 
 class TestHandleRetryable(unittest.TestCase):
@@ -99,7 +99,11 @@ class TestAskLlmUsesTheWholeBudget(unittest.TestCase):
         self.assertEqual(path, "provider_failure")
 
     def test_a_transient_failure_that_recovers_returns_a_real_answer(self):
-        result = MagicMock(text="recovered answer", finish_reason="STOP")
+        # A real LLMResult, not a MagicMock: every attribute of a mock is
+        # truthy, so a mocked result reports truncated=True and sends the
+        # answer down the truncation path this test is not about.
+        result = LLMResult(text="recovered answer", provider="gemini",
+                           model="gemini-2.5-flash", finish_reason="STOP")
         router = MagicMock()
         router.generate_for_stage.side_effect = [
             LLMError(LLMErrorCategory.UNAVAILABLE, "503"),

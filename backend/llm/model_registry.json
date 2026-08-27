@@ -109,14 +109,13 @@
       "model": "mistral-large-latest",
       "enabled": true,
       "stages": [
-        "draft",
-        "verifier"
+        "draft"
       ],
       "max_input_tokens": 100000,
-      "max_output_tokens": 32768,
+      "max_output_tokens": 8192,
       "timeout_seconds": 30,
       "privacy": "configured_external_provider",
-      "priority": 15
+      "priority": 22
     },
     {
       "alias": "groq-draft",

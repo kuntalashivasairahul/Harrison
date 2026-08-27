@@ -125,8 +125,18 @@ class SemanticCache:
     flushing to disk.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, schema_version: str | None = None) -> None:
+        """``schema_version`` retires entries written under an older schema.
+
+        The caller owns the version string -- this class knows nothing about
+        what a signature contains (CODING_RULES §1) -- but it does know that an
+        entry whose ``metadata.schema`` differs can never match a signature
+        again. Left in place, such entries were loaded at every startup, scanned
+        on every lookup, and rewritten by every flush, forever. Six of the
+        twenty-one entries on disk on 2026-08-27 were pre-v5 dead weight.
+        """
         self._entries: list[dict] = []
+        self._schema_version = schema_version
         self._lock = threading.Lock()
         self._load_from_disk()
 
@@ -174,8 +184,12 @@ class SemanticCache:
                     valid.append(entry)
 
             self._entries = valid
+            retired = self._retire_stale_schemas()
             log.info(
-                "SemanticCache: loaded %d entries from %s", len(self._entries), _CACHE_FILE
+                "SemanticCache: loaded %d entries from %s%s",
+                len(self._entries),
+                _CACHE_FILE,
+                f" ({retired} retired as pre-{self._schema_version})" if retired else "",
             )
 
         except Exception as exc:
@@ -183,6 +197,26 @@ class SemanticCache:
                 "SemanticCache: failed to load from disk (%s) — starting empty.", exc
             )
             self._entries = []
+
+    def _retire_stale_schemas(self) -> int:
+        """Drop entries from a superseded schema and rewrite the file once.
+
+        Returns the number dropped. Rewriting here rather than waiting for the
+        next ``save_to_cache`` is the point: without it the stale entries are
+        re-serialised on every flush for the life of the file.
+        """
+        if not self._schema_version:
+            return 0
+        current = [
+            entry for entry in self._entries
+            if (entry.get("metadata") or {}).get("schema") == self._schema_version
+        ]
+        retired = len(self._entries) - len(current)
+        if retired:
+            self._entries = current
+            with self._lock:
+                self._flush_to_disk()
+        return retired
 
     def _flush_to_disk(self) -> None:
         """

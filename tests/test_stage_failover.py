@@ -106,17 +106,40 @@ class TestMistralDraftFailover(unittest.TestCase):
         return router
 
     def test_every_gemini_draft_rate_limited_falls_through_to_mistral(self):
-        # Mistral is now promoted to mid-tier (priority 15, between primary and fallback).
-        # It attempts after primary fails but before fallback and other Gemini models.
+        # Mistral is the hedge for a Gemini-wide quota failure, which is what
+        # this asserts and what its name says.  It used to pass on a single 429
+        # because mistral-draft sat at priority 15, in front of
+        # gemini-draft-fallback -- so it also passed when only that one
+        # deployment was out, and that is the case that cost 30s of live
+        # latency.  Both Gemini drafts ahead of it must be out first.
         router = self._router([
-            LLMError(LLMErrorCategory.RATE_LIMITED, "429 quota"),  # gemini-primary fails
+            LLMError(LLMErrorCategory.RATE_LIMITED, "429 quota"),  # gemini-primary
+            LLMError(LLMErrorCategory.RATE_LIMITED, "429 quota"),  # gemini-draft-fallback
             LLMResult(text="answer", provider="mistral", model="mistral-large-latest"),
         ])
         with patch.dict(os.environ, {"MISTRAL_ENABLED": "true", "GROQ_ENABLED": "true"}, clear=False):
             result = router.generate_for_stage(_request(LLMStage.DRAFT), LLMStage.DRAFT)
 
         self.assertEqual(result.provider, "mistral")
-        self.assertEqual(router.attempted, ["gemini-primary", "mistral-draft"])
+        self.assertEqual(
+            router.attempted, ["gemini-primary", "gemini-draft-fallback", "mistral-draft"]
+        )
+
+    def test_one_gemini_outage_reaches_the_fast_gemini_draft_not_mistral(self):
+        """The regression the priority change exists to prevent.  gemini-primary
+        503'ing says nothing about gemini-3.5-flash's health -- it is a different
+        model -- so the stage must not skip a ~10s deployment to spend 23-30s on
+        mistral-large first."""
+        router = self._router([
+            LLMError(LLMErrorCategory.UNAVAILABLE, "503 high demand"),  # gemini-primary
+            LLMResult(text="answer", provider="gemini", model="gemini-3.5-flash"),
+        ])
+        with patch.dict(os.environ, {"MISTRAL_ENABLED": "true", "GROQ_ENABLED": "true"}, clear=False):
+            result = router.generate_for_stage(_request(LLMStage.DRAFT), LLMStage.DRAFT)
+
+        self.assertEqual(result.provider, "gemini")
+        self.assertEqual(router.attempted, ["gemini-primary", "gemini-draft-fallback"])
+        self.assertNotIn("mistral-draft", router.attempted)
 
     def test_groq_still_catches_a_mistral_outage(self):
         """Mistral is now mid-tier (priority 15, tried early), so Groq is only
@@ -148,13 +171,55 @@ class TestMistralDraftFailover(unittest.TestCase):
         self.assertNotIn("mistral-draft", router.attempted)
 
     def test_mistral_now_serves_the_verifier_stage(self):
-        # Mistral is now promoted to serve both DRAFT and VERIFIER as a hedge
-        # against Gemini quota exhaustion (gemini rate limits are unstable).
+        # Mistral hedges a Gemini-wide outage on both stages -- CODING_RULES
+        # §6.1 as amended 2026-08-27 -- but with mistral-medium-latest here,
+        # not the slower mistral-large-latest that serves the draft.
         router = self._router([_result("prod-model")])
         with patch.dict(os.environ, {"MISTRAL_ENABLED": "true"}, clear=False):
             aliases = [d.alias for d in router.deployments_for(LLMStage.VERIFIER)]
 
-        self.assertIn("mistral-draft", aliases)
+        self.assertIn("mistral-verifier", aliases)
+        self.assertNotIn("mistral-draft", aliases)
+
+    def test_the_drafting_model_is_dropped_from_the_verifier_order(self):
+        """Observed live on 2026-08-26: gemini-primary 503'd, mistral-large-latest
+        wrote the draft, and the verifier stage then picked the same deployment
+        and the same model to grade it.  Taking mistral-large off the verifier
+        stage closed that particular hole, but not the general one -- every
+        Gemini draft deployment still carries the verifier stage too, so the
+        exclusion has to be applied at routing time against whoever actually
+        served the draft.
+
+        Excluding the whole *provider* instead would empty the verifier order
+        whenever Mistral is dark, because every remaining verifier deployment is
+        Gemini.  That trades a self-verified answer for an unverified one, which
+        is not an improvement -- so a sibling Gemini model must stay eligible."""
+        router = self._router([_result("backup-model")])
+        with patch.dict(os.environ, {"MISTRAL_ENABLED": "false"}, clear=False):
+            router.generate_for_stage(
+                _request(LLMStage.VERIFIER), LLMStage.VERIFIER, exclude_model="prod-model"
+            )
+
+        self.assertTrue(router.attempted)
+        self.assertNotIn("gemini-primary", router.attempted)
+
+    def test_excluding_the_drafter_never_silently_verifies_anyway(self):
+        """If nothing independent is left the stage must fail, not fall back to
+        the drafter.  A failed verifier stage caps confidence and takes the
+        draft_fallback path; a self-verified answer would ship labelled
+        'verified', which is the worse of the two outcomes."""
+        router = self._router([])
+        sole = load_registry()["mistral-draft"]
+        # The live registry always leaves a sibling, so shrink the stage to the
+        # one deployment that would have to verify itself.
+        with patch.object(router, "deployments_for", return_value=[sole]):
+            with self.assertRaises(LLMError) as caught:
+                router.generate_for_stage(
+                    _request(LLMStage.VERIFIER), LLMStage.VERIFIER, exclude_model=sole.model
+                )
+
+        self.assertEqual(router.attempted, [])
+        self.assertEqual(caught.exception.category, LLMErrorCategory.UNAVAILABLE)
 
 
 class TestGroqDraftFailover(unittest.TestCase):

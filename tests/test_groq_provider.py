@@ -34,6 +34,19 @@ class TestGroqProvider(unittest.TestCase):
         self.assertEqual(result.finish_reason, "STOP")
         self.assertEqual(result.input_tokens, 12)
 
+    def test_openai_style_length_reads_as_truncated(self) -> None:
+        """Groq speaks OpenAI's dialect too — "length", never "MAX_TOKENS"."""
+        response = MagicMock()
+        response.id = "req-1"
+        response.usage.prompt_tokens = 12
+        response.usage.completion_tokens = 32
+        response.choices = [MagicMock(message=MagicMock(content="cut off mid-"), finish_reason="length")]
+        client = MagicMock()
+        client.chat.completions.create.return_value = response
+        with patch.dict("os.environ", {"GROQ_API_KEY": "key"}, clear=False), patch("backend.llm.groq_provider.Groq", return_value=client):
+            result = GroqProvider().generate(self._request(), "model")
+        self.assertTrue(result.truncated)
+
     def test_429_is_rate_limited(self) -> None:
         client = MagicMock()
         client.chat.completions.create.side_effect = RuntimeError("429 retry-after: 7")

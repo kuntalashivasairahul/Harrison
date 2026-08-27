@@ -287,7 +287,7 @@ class TestAskLlmReturnPaths(unittest.TestCase):
         )
         self.assertEqual(path, "graceful_fallback")
         self.assertTrue(was_truncated)
-        self.assertIn("⚠️", answer)
+        self.assertIn("**Note:**", answer)
 
     def test_verifier_retry_uses_the_configured_qa_token_limit(self):
         draft = _make_response("Complete draft answer")

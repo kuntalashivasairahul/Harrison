@@ -111,11 +111,38 @@ class TestGenerateWiring(unittest.TestCase):
         config = self._call(LLMStage.DRAFT, "gemini-3.6-flash")
         self.assertEqual(config["thinking_config"].thinking_level, "LOW")
 
+    def test_the_deadline_reaches_the_sdk_as_a_timeout(self):
+        """The router clamps deadline_seconds per deployment and per request
+        budget, and then nothing passed it on: for Gemini it bounded nothing.
+        A live gemini-3.7-flash draft ran 200s with no result and no error,
+        with the whole failover chain stuck behind it. google-genai takes
+        milliseconds."""
+        config = self._call(LLMStage.DRAFT)
+        self.assertEqual(config["http_options"]["timeout"], 30_000)
+
     def test_core_generation_params_are_always_passed(self):
         config = self._call(LLMStage.DRAFT)
         self.assertEqual(config["temperature"], 0.0)
         self.assertEqual(config["max_output_tokens"], 3000)
         self.assertEqual(config["system_instruction"], "system")
+
+
+class TestErrorNormalization(unittest.TestCase):
+    def test_the_sdk_timeout_spelling_is_fallback_eligible(self):
+        """Observed live once the deadline actually reached the SDK:
+        "504 DEADLINE_EXCEEDED". The spaced marker missed the underscore and
+        504 is not in the 500/502/503 rule, so it normalised to UNKNOWN --
+        which is not fallback-eligible, so the stage stopped with two healthy
+        deployments untried."""
+        from backend.llm.contracts import LLMErrorCategory
+        from backend.llm.gemini_provider import normalize_provider_error
+        from backend.llm.router import FALLBACK_ELIGIBLE
+
+        for message in ("504 DEADLINE_EXCEEDED", "deadline exceeded", "Read timed out"):
+            with self.subTest(message=message):
+                error = normalize_provider_error(Exception(message), "gemini")
+                self.assertEqual(error.category, LLMErrorCategory.TIMEOUT)
+                self.assertIn(error.category, FALLBACK_ELIGIBLE)
 
 
 class TestRegistryBudget(unittest.TestCase):

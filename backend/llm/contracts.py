@@ -37,6 +37,16 @@ class LLMRequest:
     stage: LLMStage
 
 
+#: Every provider spelling of "output was cut at the token ceiling".  Gemini
+#: says MAX_TOKENS; Mistral and Groq both speak OpenAI's dialect and say
+#: "length", and Mistral adds "model_length" for its context limit.  Nothing
+#: recognised either, so a truncated Mistral or Groq answer reached the user
+#: with no truncation notice and no confidence cap, and was cached and
+#: re-served as High confidence.  Compare through LLMResult.truncated, never
+#: against a literal.
+TRUNCATED_FINISH_REASONS = frozenset({"MAX_TOKENS", "LENGTH", "MODEL_LENGTH"})
+
+
 @dataclass
 class LLMResult:
     text: str
@@ -48,6 +58,11 @@ class LLMResult:
     request_id: str | None = None
     latency_seconds: float = 0.0
     raw_response: Any = field(default=None, repr=False)
+
+    @property
+    def truncated(self) -> bool:
+        """True when generation stopped at the token ceiling, not a stop token."""
+        return (self.finish_reason or "").upper() in TRUNCATED_FINISH_REASONS
 
 
 class LLMError(RuntimeError):

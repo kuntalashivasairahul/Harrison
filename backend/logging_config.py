@@ -28,8 +28,11 @@ import sys
 ROOT_LOGGER_NAME = "backend"
 
 #: Matches uvicorn's default line shape, plus the request id so lines from
-#: concurrent requests can be told apart and grepped as a group.
-LOG_FORMAT = "%(levelname)-8s [%(request_id)s] %(name)s: %(message)s"
+#: concurrent requests can be told apart and grepped as a group, plus a
+#: timestamp: uvicorn's default omits it, and without one a latency audit
+#: cannot tell how long the gap between two failover hops actually was, or
+#: which run of a query a log line belongs to.
+LOG_FORMAT = "%(asctime)s %(levelname)-8s [%(request_id)s] %(name)s: %(message)s"
 
 _configured = False
 

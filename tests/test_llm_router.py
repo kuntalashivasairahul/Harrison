@@ -55,13 +55,31 @@ class TestRegistry(unittest.TestCase):
                 self.assertNotEqual(deployment.model, "gemini-3.7-flash", deployment.alias)
 
     def test_verifier_has_provider_diversity_to_hedge_against_quota_exhaustion(self) -> None:
-        """Verifier must have options outside a single provider to prevent
-        Gemini quota exhaustion from blocking answer verification. A draft
-        provider can verify another provider's work (cross-provider is safe);
-        only same-provider verification would be unsafe."""
-        draft_providers = {d.provider for d in load_registry().values() if LLMStage.DRAFT in d.stages}
+        """CODING_RULES §6.1, amended: the verifier stage must survive a
+        provider-wide outage.  A Gemini-only verifier meant a Gemini outage left
+        only "return the draft unverified" or "fail the request", and a
+        gemini-2.5-flash 503 on both stages of one request was observed live."""
         verifier_providers = {d.provider for d in load_registry().values() if LLMStage.VERIFIER in d.stages}
         self.assertGreater(len(verifier_providers), 1, "Verifier must have multiple providers")
+
+    def test_groq_never_serves_the_verifier_stage(self) -> None:
+        """The one provider restriction the amendment did NOT relax.  Groq's
+        free tier is 8k tokens/minute, so it cannot hold a full smart_summary
+        draft plus its context and would verify against a truncated view of the
+        evidence.  Capacity, not availability, is the objection."""
+        for deployment in load_registry().values():
+            if LLMStage.VERIFIER in deployment.stages:
+                self.assertNotEqual(deployment.provider, "groq", deployment.alias)
+
+    def test_every_draft_model_has_an_independent_verifier_available(self) -> None:
+        """Self-verification is forbidden, so excluding the drafter must never
+        empty the verifier stage -- otherwise a model that drafts can only be
+        checked by itself, and the request silently degrades to unverified."""
+        registry = load_registry()
+        verifiers = [d for d in registry.values() if LLMStage.VERIFIER in d.stages]
+        for drafter in {d.model for d in registry.values() if LLMStage.DRAFT in d.stages}:
+            independent = [d for d in verifiers if d.model != drafter]
+            self.assertTrue(independent, f"{drafter} draft has no independent verifier")
 
     def test_mistral_draft_outranks_groq_draft(self) -> None:
         """Ordering is load-bearing, not cosmetic. groq-draft is capped at
@@ -87,7 +105,8 @@ class TestRegistry(unittest.TestCase):
     def test_groq_ranks_behind_all_drafts_mistral_is_first_class(self) -> None:
         """Groq is a last-resort draft option due to throughput constraints
         (8k tokens/min free tier). Mistral is promoted to mid-tier as a hedge
-        against Gemini quota exhaustion; it serves both draft and verifier."""
+        against Gemini quota exhaustion, on both the draft and verifier stages
+        -- though not with the same model on each."""
         registry = load_registry()
         gemini_draft_max = max(
             d.priority for d in registry.values()
@@ -95,7 +114,21 @@ class TestRegistry(unittest.TestCase):
         )
         self.assertGreater(registry["groq-draft"].priority, gemini_draft_max)
         self.assertLess(registry["mistral-draft"].priority, gemini_draft_max)
-        self.assertIn(LLMStage.VERIFIER, registry["mistral-draft"].stages)
+        self.assertIn(LLMStage.VERIFIER, registry["mistral-verifier"].stages)
+
+    def test_the_slow_mistral_model_drafts_but_never_verifies(self) -> None:
+        """mistral-large-latest was measured at 23-30s live and hit its own 30s
+        ceiling once, and that ceiling cannot be raised -- the budget invariant
+        below caps a draft at a third of the request budget. It stays on the
+        draft stage, where a timeout is cheap because failover continues past
+        it, and off the verifier stage, where mistral-medium-latest does the
+        same job inside 20s."""
+        registry = load_registry()
+        self.assertNotIn(LLMStage.VERIFIER, registry["mistral-draft"].stages)
+        self.assertLess(
+            registry["mistral-verifier"].timeout_seconds,
+            registry["mistral-draft"].timeout_seconds,
+        )
 
     def test_gemini_3_7_stays_disabled_until_it_can_answer(self) -> None:
         """Probed live at the real 4,096-token qa ceiling with a real prompt:
@@ -287,8 +320,14 @@ class TestRouter(unittest.TestCase):
         with patch.dict("os.environ", {"MISTRAL_ENABLED": "true"}, clear=False):
             aliases = [d.alias for d in router.deployments_for(LLMStage.DRAFT)]
         self.assertEqual(aliases[0], "gemini-primary")
-        # Mistral is now promoted to mid-tier, before the draft fallback.
-        self.assertLess(aliases.index("mistral-draft"), aliases.index("gemini-draft-fallback"))
+        # Mistral sits behind gemini-draft-fallback, not in front of it.  In
+        # front, a gemini-primary 503 bought a 23-30s mistral-large call before
+        # anything tried gemini-3.5-flash, which serves the same draft in ~10s;
+        # one live smart_summary spent 53s of a 62s request that way, 30s of it
+        # on a mistral-large call that then hit its own 30s timeout.  It stays
+        # ahead of the remaining Gemini drafts, so it is still a real hedge.
+        self.assertLess(aliases.index("gemini-draft-fallback"), aliases.index("mistral-draft"))
+        self.assertLess(aliases.index("mistral-draft"), aliases.index("gemini-flash-3.6"))
 
     def test_prompt_too_large_for_one_deployment_still_tries_the_next(self) -> None:
         """The capacity pre-check rejects the deployment, not the request. As
@@ -307,6 +346,70 @@ class TestRouter(unittest.TestCase):
         self.assertGreater(router._cooldowns[deployment.alias], 0.0)
         router._cooldowns[deployment.alias] = 0.0
         self.assertEqual(router._cooldowns[deployment.alias], 0.0)
+
+    def test_gemini_quota_still_does_not_bench_the_deployment(self) -> None:
+        """KeyManager cools the exhausted *key* and rotates to the next project.
+        Benching the deployment on top of that would hide the healthy ones."""
+        router, _ = self._router()
+        deployment = router._deployments["gemini-primary"]
+        router._cooldown(deployment, LLMError(LLMErrorCategory.RATE_LIMITED, "429", retry_after_seconds=60))
+        self.assertNotIn(deployment.alias, router._cooldowns)
+
+    def test_outage_cools_the_deployment_so_the_next_stage_skips_it(self) -> None:
+        """A 503 is a property of the model, not of the key, so key rotation
+        cannot clear it.  It used to cool nothing: gemini-primary 503'd on the
+        draft stage and the verifier stage then paid for the same 503 again,
+        ~26s of a single 79s request.  Both outage categories, both providers --
+        the old guard let UNAVAILABLE and TIMEOUT through for every one."""
+        for category in (LLMErrorCategory.UNAVAILABLE, LLMErrorCategory.TIMEOUT):
+            for alias in ("gemini-primary", "mistral-draft"):
+                with self.subTest(category=category, alias=alias):
+                    router, _ = self._router()
+                    router._cooldown(router._deployments[alias], LLMError(category, "503"))
+                    self.assertTrue(router._cooling_down(alias))
+                    self.assertEqual(router._last_errors[alias], category.value)
+
+    def test_outage_cooldown_is_short_enough_to_rediscover_recovery(self) -> None:
+        """The 503'd deployment was serving again two requests later.  Reusing
+        the 60s quota cooldown would bench it for the rest of the outage *and*
+        for most of the recovery."""
+        self.assertLessEqual(LLMRouter.OUTAGE_COOLDOWN_SECONDS, 20.0)
+
+    def test_a_cooling_deployment_is_dropped_from_the_stage_order(self) -> None:
+        """The cooldown only buys anything if deployments_for() honours it."""
+        router, _ = self._router()
+        router._mistral_provider = MagicMock(configured=True)
+        with patch.dict("os.environ", {"MISTRAL_ENABLED": "true"}, clear=False):
+            before = [d.alias for d in router.deployments_for(LLMStage.DRAFT)]
+            router._cooldown(router._deployments["gemini-primary"], LLMError(LLMErrorCategory.UNAVAILABLE, "503"))
+            after = [d.alias for d in router.deployments_for(LLMStage.DRAFT)]
+        self.assertIn("gemini-primary", before)
+        self.assertNotIn("gemini-primary", after)
+        self.assertEqual(after, [alias for alias in before if alias != "gemini-primary"])
+
+
+class TestFailureLogging(unittest.TestCase):
+    """A failed hop is the expensive one, so it is the one worth measuring."""
+
+    def test_a_failed_hop_logs_how_long_it_cost(self) -> None:
+        """The success line has always carried latency=; the failure line did
+        not, so a 30s timeout and an instant 429 read identically -- and the
+        difference between them is the entire question when a request takes
+        79s."""
+        gemini = MagicMock()
+        gemini.generate.side_effect = LLMError(LLMErrorCategory.UNAVAILABLE, "503 high demand")
+        router = LLMRouter(gemini, "gemini-prod", "gemini-backup")
+
+        with self.assertLogs("backend.llm.router", level="WARNING") as captured:
+            with self.assertRaises(LLMError):
+                router.generate(
+                    LLMRequest("prompt", "system", "draft", 0.0, 512, 30.0, LLMStage.DRAFT),
+                    router._deployments["gemini-primary"],
+                )
+
+        line = "\n".join(captured.output)
+        self.assertIn("latency=", line)
+        self.assertIn("error=unavailable", line)
 
 
 if __name__ == "__main__":

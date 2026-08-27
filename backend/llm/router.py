@@ -8,13 +8,14 @@ import os
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from backend.config import LLM_PROVIDER_COOLDOWN_SECONDS
 from backend.llm.contracts import LLMError, LLMErrorCategory, LLMRequest, LLMResult, LLMStage
 from backend.llm.groq_provider import GroqProvider
 from backend.llm.mistral_provider import MistralProvider
+from backend.observability import metrics, remaining_budget
 
 log = logging.getLogger(__name__)
 
@@ -142,12 +143,41 @@ class LLMRouter:
             return os.getenv("MISTRAL_DRAFT_MODEL", deployment.model).strip() or deployment.model
         return deployment.model
 
+    #: A model that is overloaded or hanging is unwell for seconds, not minutes,
+    #: and re-probing it is how failover discovers it recovered.  Deliberately
+    #: much shorter than the quota cooldown: a 503'd deployment was serving again
+    #: two requests later, and LLM_PROVIDER_COOLDOWN_SECONDS (60s) would have
+    #: benched the primary across that whole window for a transient spike.
+    OUTAGE_COOLDOWN_SECONDS = 15.0
+
+    #: Health failures that say something about the *deployment* rather than the
+    #: key holding it, so rotating keys cannot clear them and the next stage of
+    #: the same request should not pay to rediscover them.
+    _OUTAGE_CATEGORIES = frozenset({
+        LLMErrorCategory.UNAVAILABLE,
+        LLMErrorCategory.TIMEOUT,
+    })
+
     def _cooldown(self, deployment: Deployment, error: LLMError) -> None:
-        # Gemini quota is managed per project/key by KeyManager.  Cooling the
-        # whole Gemini deployment would incorrectly hide healthy projects.
-        if error.category != LLMErrorCategory.RATE_LIMITED or deployment.provider == "gemini":
+        # Two different failures with two different owners.
+        #
+        # Quota is per project/key and KeyManager already cools the key, so
+        # benching a whole Gemini deployment would hide projects that are fine.
+        #
+        # An outage is not.  "This model is currently experiencing high demand"
+        # is a property of the model, and no amount of key rotation clears it --
+        # but this returned early for every Gemini error *and* for UNAVAILABLE
+        # and TIMEOUT on every other provider, so nothing was ever cooled for
+        # one.  A live smart_summary paid for that twice inside one request:
+        # gemini-primary 503'd on the draft stage, then the verifier stage tried
+        # the same deployment and took the same 503 -- ~26s of a 79s request
+        # spent rediscovering an outage the previous stage had already found.
+        if error.category in self._OUTAGE_CATEGORIES:
+            wait = self.OUTAGE_COOLDOWN_SECONDS
+        elif error.category == LLMErrorCategory.RATE_LIMITED and deployment.provider != "gemini":
+            wait = error.retry_after_seconds or self._default_cooldown
+        else:
             return
-        wait = error.retry_after_seconds or self._default_cooldown
         with self._lock:
             self._cooldowns[deployment.alias] = time.monotonic() + max(wait, 1.0)
             self._last_errors[deployment.alias] = error.category.value
@@ -187,9 +217,18 @@ class LLMRouter:
             deadline_seconds=min(request.deadline_seconds, deployment.timeout_seconds),
             stage=request.stage,
         )
+        started = time.monotonic()
         try:
             result = self._adapter(deployment.provider).generate(bounded, model)
             log.info("llm_route: stage=%s provider=%s deployment=%s model=%s latency=%.3fs finish_reason=%s", bounded.stage.value, result.provider, deployment.alias, result.model, result.latency_seconds, result.finish_reason)
+            # Which deployment actually served, aggregated across every request.
+            # The per-request audit record cannot answer this: it is written only
+            # for verified, untruncated answers, so the degraded requests are
+            # precisely the ones it never captures. "It was fine, then it got
+            # worse" is a question about the deployment mix over time.
+            metrics.increment(f"llm_served_{deployment.alias}")
+            if result.truncated:
+                metrics.increment(f"llm_truncated_{deployment.alias}")
             return result
         except LLMError as error:
             self._cooldown(deployment, error)
@@ -200,10 +239,16 @@ class LLMRouter:
             # clears in a minute is indistinguishable in the logs from one that
             # clears at midnight Pacific. Log the model too, so a failing
             # (key, model) pair can be read straight off the line above it.
+            # latency on the failure line too: a 30s timeout and an instant 429
+            # are the same line without it, and the difference is the whole
+            # question when a request takes 79s. The success line has always
+            # carried it, so the hops that cost the most were the only ones you
+            # could not measure.
             log.warning(
-                "llm_route: stage=%s provider=%s deployment=%s model=%s error=%s "
-                "fallback_eligible=%s detail=%s",
+                "llm_route: stage=%s provider=%s deployment=%s model=%s latency=%.3fs "
+                "error=%s fallback_eligible=%s detail=%s",
                 bounded.stage.value, deployment.provider, deployment.alias, model,
+                time.monotonic() - started,
                 error.category.value, error.category in FALLBACK_ELIGIBLE,
                 str(error)[:400].replace("\n", " "),
             )
@@ -215,29 +260,121 @@ class LLMRouter:
             raise LLMError(LLMErrorCategory.UNAVAILABLE, f"Deployment {alias!r} is not eligible.")
         return self.generate(request, deployment, model_override=model_override)
 
-    def generate_for_stage(self, request: LLMRequest, stage: LLMStage) -> LLMResult:
+    #: Below this a call cannot complete anyway and the round trip is wasted.
+    _MIN_HOP_SECONDS = 1.0
+
+    def _within_budget(self, request: LLMRequest) -> LLMRequest | None:
+        """Shrink a request's deadline to what is left of the request budget.
+
+        None means there is nothing left to spend and the caller should stop.
+        """
+        remaining = remaining_budget()
+        if remaining is None:
+            return request
+        if remaining < self._MIN_HOP_SECONDS:
+            return None
+        return replace(request, deadline_seconds=min(request.deadline_seconds, remaining))
+
+    def generate_for_stage(
+        self,
+        request: LLMRequest,
+        stage: LLMStage,
+        exclude_model: str | None = None,
+    ) -> LLMResult:
         """Try every eligible deployment for a stage, in priority order.
 
         The draft and verifier stages previously called generate_named() against
         a single deployment, so a provider-side outage on that one model failed
         the whole request even though a second Gemini deployment was configured
         and healthy. This is the failover the optimizer stage has always had.
+
+        ``exclude_model`` drops one model from the order. It exists for the
+        verifier stage, which must not be served by the model that wrote the
+        draft: a model asked to grade its own work is the least likely to catch
+        its own ungrounded claim, and that is the entire job of verify_answer().
+        Without it, mistral-draft sitting on both stages meant a Gemini outage
+        produced a mistral-large draft verified by mistral-large -- observed live
+        on 2026-08-26, and no rule in the registry could express the constraint
+        because it depends on which deployment actually served the draft.
+
+        The exclusion is per model, not per provider. Excluding the provider
+        would empty the verifier order outright whenever Mistral is dark, since
+        every remaining verifier deployment is Gemini -- trading a self-verified
+        answer for an unverified one, which is not an improvement.
         """
         last_error: LLMError | None = None
+        longest_truncated: LLMResult | None = None
+        reason = "unknown"
         deployments = self.deployments_for(stage)
+        if exclude_model is not None:
+            # _resolve_model(), not deployment.model: the Gemini entries carry
+            # the sentinels "dynamic-prod"/"dynamic-backup" and only resolve to
+            # a real model name at call time, so comparing the raw field would
+            # never match the drafter and the exclusion would silently no-op.
+            independent = [
+                d for d in deployments if self._resolve_model(d) != exclude_model
+            ]
+            if not independent:
+                # Refusing is the safe end of this branch: the caller treats a
+                # failed verifier stage as "not verified", which caps confidence
+                # and takes the draft_fallback path. Verifying with the drafter
+                # would instead return a self-approved answer labelled verified.
+                raise LLMError(
+                    LLMErrorCategory.UNAVAILABLE,
+                    f"No {stage.value} deployment is independent of model "
+                    f"{exclude_model!r}.",
+                )
+            if len(independent) != len(deployments):
+                log.info(
+                    "llm_route: stage=%s excluding model=%s (wrote the draft) — "
+                    "%d independent deployment(s) remain.",
+                    stage.value, exclude_model, len(independent),
+                )
+            deployments = independent
         for index, deployment in enumerate(deployments):
             try:
                 if index:
                     log.warning(
                         "llm_route: stage=%s falling back to deployment=%s after %s",
-                        stage.value, deployment.alias,
-                        last_error.category.value if last_error else "unknown",
+                        stage.value, deployment.alias, reason,
                     )
-                return self.generate(request, deployment)
+                # The stage deadline is computed once, before this loop, so every
+                # hop reused the *original* allowance: five draft deployments at
+                # 60s each is 300s against a 90s request budget. Re-clamp per hop
+                # and stop when the budget is gone, so failover cannot outlive it.
+                hop = self._within_budget(request)
+                if hop is None:
+                    log.warning(
+                        "llm_route: stage=%s request budget exhausted after %s — "
+                        "%d deployment(s) left untried.",
+                        stage.value, reason, len(deployments) - index,
+                    )
+                    break
+                result = self.generate(hop, deployment)
+                if not result.truncated:
+                    return result
+                # A response cut at the token ceiling is a *successful* call, so
+                # it never reached the except branch below: the stage handed back
+                # the stump with every remaining deployment untried, and the user
+                # got half an answer plus a truncation notice. Escalate instead —
+                # the deployments further down have their own output ceilings and
+                # Mistral's is the largest. Keep the longest partial in case they
+                # all truncate. Bounded by _within_budget() above.
+                reason = "truncated_output"
+                if longest_truncated is None or len(result.text) > len(longest_truncated.text):
+                    longest_truncated = result
             except LLMError as error:
                 last_error = error
+                reason = error.category.value
                 if error.category not in FALLBACK_ELIGIBLE:
                     break
+        if longest_truncated is not None:
+            log.warning(
+                "llm_route: stage=%s every deployment truncated — returning the longest "
+                "(model=%s, %d chars).",
+                stage.value, longest_truncated.model, len(longest_truncated.text),
+            )
+            return longest_truncated
         raise last_error or LLMError(
             LLMErrorCategory.UNAVAILABLE, f"No {stage.value} deployment is eligible."
         )

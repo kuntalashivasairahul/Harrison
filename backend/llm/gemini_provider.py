@@ -17,7 +17,13 @@ def normalize_provider_error(exc: Exception, provider: str) -> LLMError:
     # up instead of trying the next deployment.
     if any(marker in text for marker in ("429", "413", "quota", "rate limit", "rate_limit", "resource exhausted", "resourceexhausted")):
         return LLMError(LLMErrorCategory.RATE_LIMITED, str(exc), provider=provider)
-    if any(marker in text for marker in ("timeout", "timed out", "deadline exceeded")):
+    # "deadline_exceeded" (underscored) and 504 are how google-genai reports a
+    # client-side timeout: "504 DEADLINE_EXCEEDED". The spaced spelling missed
+    # it and 504 is not in the 500/502/503 rule below, so it fell through to
+    # UNKNOWN -- not fallback-eligible, so the first deployment to time out
+    # aborted the stage with the rest of the chain untried. Same defect shape as
+    # the "rate_limit" and "does not exist" spellings above.
+    if any(marker in text for marker in ("timeout", "timed out", "deadline exceeded", "deadline_exceeded", "504")):
         return LLMError(LLMErrorCategory.TIMEOUT, str(exc), provider=provider)
     if any(marker in text for marker in ("401", "403", "api key", "authentication", "permission denied")):
         return LLMError(LLMErrorCategory.AUTH, str(exc), provider=provider)
@@ -53,6 +59,14 @@ class GeminiProvider:
                 "system_instruction": request.system_instruction,
                 "temperature": request.temperature,
                 "max_output_tokens": request.max_output_tokens,
+                # The router clamps deadline_seconds against the deployment
+                # timeout and the request budget, but nothing ever handed it to
+                # the SDK, so for Gemini it bounded nothing: a call that stopped
+                # responding hung the request with no timeout at any layer. Seen
+                # live on gemini-3.7-flash — 200s, no result, no error.
+                # google-genai wants milliseconds. A TIMEOUT is fallback
+                # eligible, so this escalates now instead of hanging.
+                "http_options": {"timeout": int(request.deadline_seconds * 1000)},
             }
             thinking = self._thinking_config(request.stage, model)
             if thinking is not None:

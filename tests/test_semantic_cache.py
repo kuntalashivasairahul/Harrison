@@ -5,6 +5,7 @@ Regression tests for semantic cache signature isolation.
 """
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -24,6 +25,45 @@ class TestSemanticCache(unittest.TestCase):
         cache_mod._CACHE_DIR = self._old_cache_dir
         cache_mod._CACHE_FILE = self._old_cache_file
         self._tmp.cleanup()
+
+    def _seed(self, entries):
+        cache_mod._CACHE_FILE.write_text(json.dumps(entries), encoding="utf-8")
+
+    def test_entries_from_a_superseded_schema_are_dropped_at_load(self):
+        """A stale entry can never match a signature again, but it was still
+        loaded at startup, scanned on every lookup, and rewritten by every
+        flush. Six of twenty-one entries on disk were pre-v5 dead weight."""
+        self._seed([
+            {"embedding": [1.0], "response": {"answer": "old"},
+             "metadata": {"schema": "semantic-cache-v4"}},
+            {"embedding": [1.0], "response": {"answer": "new"},
+             "metadata": {"schema": "semantic-cache-v5"}},
+        ])
+        cache = cache_mod.SemanticCache(schema_version="semantic-cache-v5")
+
+        self.assertEqual(cache.size, 1)
+        self.assertEqual(cache._entries[0]["response"]["answer"], "new")
+
+    def test_retiring_rewrites_the_file_rather_than_only_memory(self):
+        """Dropping them in memory alone leaves the next process to reload the
+        same dead weight."""
+        self._seed([
+            {"embedding": [1.0], "response": {"answer": "old"},
+             "metadata": {"schema": "semantic-cache-v4"}},
+        ])
+        cache_mod.SemanticCache(schema_version="semantic-cache-v5")
+
+        on_disk = json.loads(cache_mod._CACHE_FILE.read_text(encoding="utf-8"))
+        self.assertEqual(on_disk, [])
+
+    def test_no_schema_version_retires_nothing(self):
+        """The version is the caller's to own; without one the cache keeps its
+        previous behaviour rather than guessing."""
+        self._seed([
+            {"embedding": [1.0], "response": {"answer": "old"},
+             "metadata": {"schema": "semantic-cache-v4"}},
+        ])
+        self.assertEqual(cache_mod.SemanticCache().size, 1)
 
     def test_metadata_mismatch_misses_even_with_same_embedding(self):
         cache = cache_mod.SemanticCache()

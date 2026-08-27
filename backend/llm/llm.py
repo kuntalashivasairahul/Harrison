@@ -599,7 +599,12 @@ llm_router = LLMRouter(gemini_provider, prod_model, backup_model, draft_fallback
 # further tokens on an internal reasoning pass for the draft. At 3,000 the
 # draft hit MAX_TOKENS on ordinary clinical topics and was returned truncated.
 SMART_SUMMARY_MAX_TOKENS = int(os.getenv("SMART_SUMMARY_MAX_TOKENS", "8000"))
-QA_MAX_TOKENS = int(os.getenv("QA_MAX_TOKENS", "3000"))
+# 3,000 was set before the 3.x deployments landed. Those models reason far more
+# freely, and the reasoning pass is charged to the same max_output_tokens as the
+# answer — a live qa draft on gemini-3-flash-preview came back MAX_TOKENS inside
+# the old ceiling with the answer half-written. 4,096 leaves the answer its room
+# without approaching the 8,192 registry cap.
+QA_MAX_TOKENS = int(os.getenv("QA_MAX_TOKENS", "4096"))
 # SMART_SUMMARY_CONTEXT_CHAR_LIMIT lives in backend/utils/fusion.py, which is
 # the module that actually applies it.  It was read here and never used.
 
@@ -619,6 +624,7 @@ def verify_answer(
     model: str | None = None,
     compact_prompt: bool = False,
     max_output_tokens: int | None = None,
+    drafted_by_model: str | None = None,
 ) -> tuple[str, bool, bool]:
     """
     Post-hoc verification step that checks the draft answer against
@@ -626,6 +632,15 @@ def verify_answer(
     explanations and detail whenever possible.
 
     Includes automatic API key rotation on 429 / Quota-Exceeded errors.
+
+    Parameters
+    ----------
+    drafted_by_model
+        Model that produced ``answer``.  It is excluded from the verifier
+        stage, because a model grading its own draft is the least likely to
+        catch its own ungrounded claim -- CODING_RULES §6.1 forbids
+        self-verification.  ``None`` keeps the previous behaviour and is only
+        correct when the caller genuinely does not know the drafter.
 
     Returns
     -------
@@ -700,10 +715,12 @@ def verify_answer(
             result = (
                 llm_router.generate_named(request, "gemini-primary", model_override=model)
                 if model is not None
-                else llm_router.generate_for_stage(request, LLMStage.VERIFIER)
+                else llm_router.generate_for_stage(
+                    request, LLMStage.VERIFIER, exclude_model=drafted_by_model
+                )
             )
             verified = result.text
-            truncated = result.finish_reason == "MAX_TOKENS"
+            truncated = result.truncated
 
             if not verified:
                 return answer, truncated, True
@@ -934,7 +951,7 @@ def ask_llm(
                 timings["draft_generation"] = timings.get("draft_generation", 0.0) + (t_gen_end - t_gen_start)
 
             content = result.text
-            draft_truncated = result.finish_reason == "MAX_TOKENS"
+            draft_truncated = result.truncated
 
             if not content:
                 return REFUSAL_STR, "", False, "provider_failure"
@@ -947,7 +964,7 @@ def ask_llm(
                     DRAFT_MAX_ATTEMPTS,
                 )
                 content += (
-                    "\n\n> ⚠️ *Answer truncated — token budget reached. "
+                    "\n\n> **Note:** *Answer truncated — token budget reached. "
                     "Try a more specific query or split into sub-questions.*"
                 )
 
@@ -972,7 +989,13 @@ def ask_llm(
 
             # Verification pass
             t_verify_start = time.perf_counter()
-            verified, verifier_truncated, verification_ran = verify_answer(draft_answer, fused_context, mode=mode, model=model)
+            # result.model is the model that actually served the draft after
+            # failover, not the one the priority order started with, so it is
+            # the only value that keeps the verifier independent.
+            verified, verifier_truncated, verification_ran = verify_answer(
+                draft_answer, fused_context, mode=mode, model=model,
+                drafted_by_model=result.model,
+            )
             t_verify_end = time.perf_counter()
             if timings is not None:
                 timings["verification"] = t_verify_end - t_verify_start
@@ -992,6 +1015,7 @@ def ask_llm(
                     model=model,
                     compact_prompt=True,
                     max_output_tokens=generation_max_tokens,
+                    drafted_by_model=result.model,
                 )
                 t_retry_end = time.perf_counter()
                 if timings is not None:
@@ -1029,7 +1053,7 @@ def ask_llm(
                     # Both draft and verified are truncated, return graceful fallback or clearly marked partial
                     final_answer = (
                         verified.strip()
-                        + "\n\n> ⚠️ *Answer verification was incomplete due to length constraints.*"
+                        + "\n\n> **Note:** *Answer verification was incomplete due to length constraints.*"
                     )
                     was_truncated = True
                     returned_path = "graceful_fallback"

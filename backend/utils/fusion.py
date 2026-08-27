@@ -139,6 +139,6 @@ def fuse_chunks(chunks) -> str:
     return "\n".join(item["line"] for item in _select_within_budget(chunks))
 
 
-# ✅ ALIAS TO MATCH main.py
+# ALIAS TO MATCH main.py
 def fuse_context(chunks):
     return fuse_chunks(chunks)
