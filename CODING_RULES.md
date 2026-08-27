@@ -19,9 +19,9 @@ elegance, latency, token efficiency, and user experience.**
 ### 1.1 Never Invent Medical Claims
 
 ```
-❌ FORBIDDEN: Generating a medical claim not present in the retrieved context.
-❌ FORBIDDEN: Synthesizing "common knowledge" medicine when the context is absent.
-✅ REQUIRED:  Return REFUSAL_STR if the retrieved context is insufficient.
+✗ FORBIDDEN: Generating a medical claim not present in the retrieved context.
+✗ FORBIDDEN: Synthesizing "common knowledge" medicine when the context is absent.
+✓ REQUIRED:  Return REFUSAL_STR if the retrieved context is insufficient.
 ```
 
 The correct refusal string is defined in `backend/llm/llm.py`:
@@ -35,9 +35,9 @@ answer anyway with a disclaimer.
 ### 1.2 Never Invent Citations
 
 ```
-❌ FORBIDDEN: Writing [p:9999] or any page marker not present in retrieved_chunks.
-❌ FORBIDDEN: Paraphrasing a page number (e.g., "around page 2000").
-✅ REQUIRED:  Only propagate page markers that appear in fused_context or evidence.
+✗ FORBIDDEN: Writing [p:9999] or any page marker not present in retrieved_chunks.
+✗ FORBIDDEN: Paraphrasing a page number (e.g., "around page 2000").
+✓ REQUIRED:  Only propagate page markers that appear in fused_context or evidence.
 ```
 
 Citation invention is equivalent to fabricating a reference in a peer-reviewed
@@ -46,9 +46,9 @@ paper — except the reader may act on it clinically.
 ### 1.3 The Verify Step is Not Optional
 
 ```
-❌ FORBIDDEN: Skipping verify_answer() to reduce latency.
-❌ FORBIDDEN: Bypassing verify_answer() by returning draft_answer directly.
-✅ REQUIRED:  verify_answer() MUST be called on every non-refusal answer.
+✗ FORBIDDEN: Skipping verify_answer() to reduce latency.
+✗ FORBIDDEN: Bypassing verify_answer() by returning draft_answer directly.
+✓ REQUIRED:  verify_answer() MUST be called on every non-refusal answer.
 ```
 
 `verify_answer()` is the last safety gate before the response reaches the
@@ -76,10 +76,10 @@ introduces bugs that are extremely hard to trace in a pipeline system.**
 | `utils/`           | Standard library only                          | Any domain module                     |
 
 ```
-❌ FORBIDDEN: retrieval/rag.py importing from fastapi or llm/
-❌ FORBIDDEN: llm/llm.py importing from retrieval/ or processing/
-❌ FORBIDDEN: Inlining fuse_context() logic inside api/main.py
-✅ REQUIRED:  api/main.py orchestrates; domain modules do the work
+✗ FORBIDDEN: retrieval/rag.py importing from fastapi or llm/
+✗ FORBIDDEN: llm/llm.py importing from retrieval/ or processing/
+✗ FORBIDDEN: Inlining fuse_context() logic inside api/main.py
+✓ REQUIRED:  api/main.py orchestrates; domain modules do the work
 ```
 
 ### 2.2 Retrieval Math Lives in retrieval/
@@ -105,6 +105,7 @@ remain so:
 
 ```python
 calculate_confidence(chunks, original_answer, verified_answer) → str
+answer_declines(answer) → bool
 extract_evidence(chunks)  → List[str]
 extract_sources(chunks)   → List[str]
 resolve_page_urls(sources, base_url) → List[Dict[str, str]]
@@ -117,8 +118,8 @@ production caller disappeared from `api/main.py`; nothing but a test stub
 referenced it.
 
 ```
-❌ FORBIDDEN: Adding logging, DB writes, or HTTP calls inside these functions.
-✅ REQUIRED:  Logging and side-effects belong in api/main.py or the caller.
+✗ FORBIDDEN: Adding logging, DB writes, or HTTP calls inside these functions.
+✓ REQUIRED:  Logging and side-effects belong in api/main.py or the caller.
 ```
 
 ---
@@ -148,22 +149,22 @@ should be excluded from IDE workspace indexing settings.
 An AI assistant **must NEVER**:
 
 ```
-❌ Remove or bypass `verify_answer()` outside the documented `disable_verifier` request option.
-❌ Remove, comment out, or wrap resolve_page_urls() in a conditional.
-❌ Remove, comment out, or bypass the RERANK_SCORE_THRESHOLD filter.
-❌ Remove the confidence, sources, or visual_context fields from QueryResponse.
-❌ Substitute a hardcoded confidence string ("High") for calculate_confidence().
-❌ Silently drop evidence from the LLM prompt to reduce token count.
+✗ Remove or bypass `verify_answer()` outside the documented `disable_verifier` request option.
+✗ Remove, comment out, or wrap resolve_page_urls() in a conditional.
+✗ Remove, comment out, or bypass the RERANK_SCORE_THRESHOLD filter.
+✗ Remove the confidence, sources, or visual_context fields from QueryResponse.
+✗ Substitute a hardcoded confidence string ("High") for calculate_confidence().
+✗ Silently drop evidence from the LLM prompt to reduce token count.
 ```
 
 An AI assistant **must ALWAYS**:
 
 ```
-✅ Preserve all existing docstrings and inline comments in Python files.
-✅ Keep the QueryResponse field set intact (answer, confidence, sources, visual_context).
-✅ Route new features through api/main.py as orchestration, not into domain modules.
-✅ Run the /health endpoint check after any change to config.py or rag.py.
-✅ Justify any proposed change to RERANK_SCORE_THRESHOLD or RRF_K in writing.
+✓ Preserve all existing docstrings and inline comments in Python files.
+✓ Keep the QueryResponse field set intact (answer, confidence, sources, visual_context).
+✓ Route new features through api/main.py as orchestration, not into domain modules.
+✓ Run the /health endpoint check after any change to config.py or rag.py.
+✓ Justify any proposed change to RERANK_SCORE_THRESHOLD or RRF_K in writing.
 ```
 
 ### 3.3 Refactoring Constraints
@@ -192,11 +193,11 @@ every response the system produces.
 All base prompts **must** contain explicit instructions to forbid:
 
 ```
-❌ Step-by-step reasoning leakage: "Step 1", "Step 2", "Step 3"
-❌ Chain-of-thought markers: "reasoning:", "thinking:", "final answer:"
-❌ Knowledge outside context: "Based on general medical knowledge..."
-❌ Invented citations: page numbers not present in the provided context
-❌ Empty section headers: headings with no supporting evidence
+✗ Step-by-step reasoning leakage: "Step 1", "Step 2", "Step 3"
+✗ Chain-of-thought markers: "reasoning:", "thinking:", "final answer:"
+✗ Knowledge outside context: "Based on general medical knowledge..."
+✗ Invented citations: page numbers not present in the provided context
+✗ Empty section headers: headings with no supporting evidence
 ```
 
 These prohibitions are already enforced in the current prompts. Do not remove
@@ -207,11 +208,11 @@ them to make prompts shorter.
 All base prompts **must** contain:
 
 ```
-✅ Instruction to use ONLY the provided Harrison context
-✅ Instruction to cite page numbers using [p:NNN] markers
-✅ Instruction to never invent or guess page numbers
-✅ Instruction to synthesize evidence into textbook-style prose (not list of bullets)
-✅ Instruction to output the final answer directly (no preamble/reasoning chain)
+✓ Instruction to use ONLY the provided Harrison context
+✓ Instruction to cite page numbers using [p:NNN] markers
+✓ Instruction to never invent or guess page numbers
+✓ Instruction to synthesize evidence into textbook-style prose (not list of bullets)
+✓ Instruction to output the final answer directly (no preamble/reasoning chain)
 ```
 
 ### 4.3 Smart Summary Acknowledgement Invariant
@@ -230,12 +231,12 @@ remove this function or its call sites.
 `verify_answer()` uses a separate system + user prompt pair.  Its rules are:
 
 ```
-✅ Check each factual claim against context
-✅ Keep supported claims
-✅ Rewrite partially-supported claims to match context
-✅ Remove only claims that cannot be supported at all
-✅ Never invent new page numbers
-✅ Always output a single corrected answer (no meta-commentary)
+✓ Check each factual claim against context
+✓ Keep supported claims
+✓ Rewrite partially-supported claims to match context
+✓ Remove only claims that cannot be supported at all
+✓ Never invent new page numbers
+✓ Always output a single corrected answer (no meta-commentary)
 ```
 
 The verification temperature is always `0.0` (deterministic). Do not change it.
@@ -270,13 +271,13 @@ weights, no FAISS index. That is why it runs in seconds and why CI needs no
 credentials.
 
 ```
-❌ FORBIDDEN: A test in tests/ that loads the real index or calls a live model.
-❌ FORBIDDEN: Mutating sys.modules without restoring it — one test that did
+✗ FORBIDDEN: A test in tests/ that loads the real index or calls a live model.
+✗ FORBIDDEN: Mutating sys.modules without restoring it — one test that did
               silently replaced the Google SDK for every test collected after it.
-❌ FORBIDDEN: Naming a program in scripts/ `test_*.py`. Those are interactive
+✗ FORBIDDEN: Naming a program in scripts/ `test_*.py`. Those are interactive
               diagnostics that load real models; pytest must not collect them.
               They are named `probe_*.py`.
-✅ REQUIRED:  Use tests/_api_harness.py to import the HTTP layer cheaply.
+✓ REQUIRED:  Use tests/_api_harness.py to import the HTTP layer cheaply.
 ```
 
 Integration coverage against the real index and a live model is a separate tier
@@ -312,18 +313,18 @@ No module under `backend/` may perform expensive or networked work at import
 time.
 
 ```
-❌ FORBIDDEN: Loading the FAISS index, chunk registry, BM25 corpus, or an
+✗ FORBIDDEN: Loading the FAISS index, chunk registry, BM25 corpus, or an
               encoder at module scope.
-❌ FORBIDDEN: Any network call at import — model discovery included.
-❌ FORBIDDEN: logging.getLogger("uvicorn.error") in a backend module. Uvicorn
+✗ FORBIDDEN: Any network call at import — model discovery included.
+✗ FORBIDDEN: logging.getLogger("uvicorn.error") in a backend module. Uvicorn
               leaves root bare at WARNING, so backend.* INFO logs were being
               discarded; two modules had worked around it locally, which fixed
               those call sites and hid the cause.
-✅ REQUIRED:  Resolve on first use; force it deliberately in the FastAPI
+✓ REQUIRED:  Resolve on first use; force it deliberately in the FastAPI
               lifespan handler.
-✅ REQUIRED:  Call configure_logging() before any other backend.* import in an
+✓ REQUIRED:  Call configure_logging() before any other backend.* import in an
               entry point, so import-time diagnostics are captured.
-✅ REQUIRED:  Module loggers via logging.getLogger(__name__).
+✓ REQUIRED:  Module loggers via logging.getLogger(__name__).
 ```
 
 Rationale: import-time work is paid by every test run, every diagnostic script,
@@ -349,7 +350,8 @@ torch            ← required by sentence-transformers; pinned, not newly introd
 transformers     ← required by sentence-transformers; pinned, not newly introduced
 numpy
 google-genai
-groq             ← Stage 1 query optimizer only; never draft or verification
+groq             ← query optimizer, and draft failover of last resort; never verification
+                   (Mistral is also an approved draft provider — stdlib urllib, no package)
 python-dotenv
 rank-bm25
 PyMuPDF          ← for pre-processing page renders (offline only)
@@ -364,9 +366,114 @@ with no guarantee of reproducing the same embeddings against the committed
 FAISS index. Pinning a dependency you already had is a reproducibility control,
 not a new dependency; adding a genuinely new package still requires §6.2.
 
-`groq` predates this list and serves the optimizer stage only, per the Stage 1
-provider policy in `README.md`. It is recorded here so the list matches
-`backend/requirements.txt`.
+`groq` predates this list. It serves the optimizer stage, and the `groq-draft`
+deployment serves the draft stage at priority 30 — reached only after both
+Gemini draft deployments have failed with a fallback-eligible error. The
+original "never draft" restriction was written when Groq meant an 8B optimizer
+model; it now serves 120B-class models, and a Groq draft is still verified by
+Gemini against the same context, so `verify_answer()` and the citation checks
+are not weakened. **Groq must never serve the verifier stage** — that would
+leave no independent check on a Groq draft. See the provider policy in
+`README.md`.
+
+**Mistral is an approved draft provider and adds no dependency.** The
+`mistral-draft` deployment (priority 22) is served by
+`backend/llm/mistral_provider.py`, which posts to Mistral's chat-completions
+endpoint using `urllib` from the standard library. The `mistralai` SDK would
+need a §6.2 justification to buy one JSON POST, and `httpx` is a *development*
+dependency that §6.1a forbids importing from `backend/` — so neither is used.
+Nothing was added to `backend/requirements.txt` for this provider, and there is
+nothing to pin.
+
+#### The verifier rule, amended 2026-08-27: independence, not Gemini
+
+This rule previously read **"Gemini is the only approved verifier."** It now
+reads:
+
+> **A draft must be verified by a different model than the one that wrote it.**
+> The verifier stage is open to any approved provider. **Self-verification — the
+> same model grading its own draft — is forbidden**, and the exclusion is applied
+> at routing time against the model that *actually* served the draft after
+> failover, not the one the priority order started with.
+
+**Why the change.** The original rule conflated two things: *independence* (the
+property that actually protects the answer) and *Gemini* (the provider that
+happened to supply it). What `verify_answer()` defends against is a model
+approving its own ungrounded claim, because a model asked to check its own work
+is the least likely to catch it. That risk lives in the *sameness* of drafter
+and verifier, not in the vendor name. A Mistral verifier reading a Gemini draft
+against the same retrieved context is an independent check by the only
+definition that matters here.
+
+**Why the unit is the model, not the provider.** Provider-level exclusion was
+implemented first and rejected on evidence. Every verifier deployment except the
+two Mistral entries is Gemini, and Mistral is opt-in (`MISTRAL_ENABLED`), so in
+the default configuration barring the drafter's *provider* empties the verifier
+order for every request — trading a self-verified answer for an unverified one,
+which is not an improvement. `gemini-3.6-flash` grading a `gemini-2.5-flash`
+draft is a different set of weights reading the same evidence; that is the
+independence the rule is for, and it is the posture the codebase has always
+had. Same-provider verification is therefore permitted; same-*model*
+verification is not.
+
+**What forced it.** Gemini's free-tier availability is not reliable enough to be
+a single point of failure on a safety-critical stage. Measured on 2026-08-26/27,
+`gemini-2.5-flash` returned `503 UNAVAILABLE` on the draft *and* verifier stages
+of the same request. With a Gemini-only verifier, a Gemini-wide outage leaves
+two options: return an unverified draft, or fail the request. Both are worse for
+the reader than a verified answer from a second vendor. Provider diversity on
+the verifier stage is what keeps `verify_answer()` running at all during an
+outage — the rule was protecting the mechanism into uselessness.
+
+**What did not change, and must not.**
+
+- `verify_answer()` still runs. This amendment widens *who* may verify; it never
+  authorises skipping verification. RULE 3.2 is untouched.
+- The verifier still checks against the same retrieved context, and the citation
+  and grounding checks apply unchanged.
+- **Self-verification stays forbidden.** A `mistral-large-latest` draft must not
+  be verified by `mistral-large-latest`, and a `gemini-2.5-flash` draft must not
+  be verified by `gemini-2.5-flash`.
+- Gemini remains the *preferred* verifier by priority order; a non-Gemini
+  verifier is a fallback that engages when the Gemini deployments ahead of it
+  are unavailable, not a co-equal default. Mistral's verifier is
+  `mistral-verifier` (`mistral-medium-latest`, 20s, priority 27 — behind
+  every Gemini verifier, per the paragraph above), not the slower
+  `mistral-large-latest` that serves the draft: that model was measured at
+  23-30s live and hit its own 30s ceiling once, and the ceiling cannot be
+  raised because §6.1's budget invariant caps a draft at a third of
+  `LLM_TOTAL_REQUEST_BUDGET_SECONDS`. A timeout on the draft stage is cheap --
+  failover continues past it -- so that is where it stays.
+- **Groq must still never serve the verifier stage.** That is a separate
+  constraint and it survives: Groq's 8k-token-per-minute free-tier ceiling means
+  it cannot hold a full `smart_summary` draft plus its context, so it would
+  verify against a truncated view of the evidence. Availability was never the
+  objection; capacity is.
+
+**Enforcement.** Two layers, because the registry alone cannot express the
+constraint — it depends on which deployment failover actually reached.
+
+- *Config time:* `tests/test_llm_router.py` asserts against the registry that the
+  verifier stage has more than one provider, that Groq is absent from it, and
+  that every draft model has an independent verifier available.
+- *Routing time:* `LLMRouter.generate_for_stage(..., exclude_model=...)` drops
+  the drafter's model from the verifier order. `ask_llm()` passes
+  `result.model` — the model that served the draft after failover. If the
+  exclusion empties the order the stage raises rather than falling back to the
+  drafter: a failed verifier stage caps confidence and takes the
+  `draft_fallback` path, whereas a self-verified answer would ship labelled
+  `verified`, which is the worse of the two. `tests/test_stage_failover.py`
+  covers all three branches.
+
+A future registry entry still cannot quietly change the posture — the assertions
+changed, they were not removed.
+
+**Honest history.** Commit `d5739d9` put Mistral on the verifier stage and
+rewrote the guard test *without* amending this section, so the code and the rule
+disagreed for a day and the rule text said the guard still existed when it did
+not. That is the failure mode §6.1 exists to prevent, and it is recorded here
+rather than quietly overwritten. A registry change that contradicts a written
+rule must amend the rule in the same commit.
 
 ### 6.1a Development Dependencies
 
@@ -378,6 +485,32 @@ pytest
 httpx            ← required by fastapi.testclient
 ruff
 ```
+
+### 6.1b Vendored Browser Assets
+
+`backend/api/static/vendor/` holds third-party code that runs in the *browser*,
+not in Python. It is served as a static asset and is never imported by anything
+under `backend/`, so it does not belong in `backend/requirements.txt` and 6.2's
+pip audit does not apply to it.
+
+```
+vendor/three/   Three.js — WebGL renderer for the helix hero
+```
+
+It is vendored rather than loaded from a CDN so the page has no third-party
+runtime dependency and no request that can be blocked, stale, or substituted.
+
+Rules that *do* apply:
+
+1. Ship the upstream `LICENSE` alongside the code.
+2. Record provenance, exact version, and upgrade steps in a `README.md` next to
+   it. `vendor/three/README.md` is the reference.
+3. Vendor every file the entry point imports. Three.js splits
+   `three.module.min.js` from `three.core.min.js` as a *relative sibling*
+   import; vendoring only the first is a 404 and a silently blank canvas.
+4. No `?v=` cache-buster on an importmap target. The relative sibling import
+   resolves against the entry point's URL, so a query string would be inherited
+   by one half of the library and not the other.
 
 ### 6.2 Adding a New Dependency
 
@@ -397,7 +530,7 @@ Adding any new dependency requires:
 ┌─────────────────────────────────────────────────────────────┐
 │                  HarrisonGPT — DO / DON'T                   │
 ├────────────────────────┬────────────────────────────────────┤
-│          ✅ DO          │            ❌ DON'T                 │
+│          DO            │            DON'T                   │
 ├────────────────────────┼────────────────────────────────────┤
 │ Cite [p:NNN] from ctx  │ Invent page numbers                │
 │ Return REFUSAL_STR     │ Answer without context             │

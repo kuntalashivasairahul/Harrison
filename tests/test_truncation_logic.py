@@ -23,7 +23,13 @@ class _Config:
 class TestTruncationLogic(unittest.TestCase):
     def _ask(self, responses):
         client = MagicMock()
-        client.models.generate_content.side_effect = responses
+        if isinstance(responses, list):
+            client.models.generate_content.side_effect = responses
+        else:
+            # One response reused for every call. A truncated result now
+            # escalates to the next deployment, so a stage that keeps truncating
+            # walks its whole chain and a fixed-length script runs dry mid-chain.
+            client.models.generate_content.side_effect = lambda *_a, **_kw: responses
         with patch("backend.llm.llm.key_manager") as key_manager, \
              patch("backend.llm.llm.types") as types:
             key_manager.next_client.return_value = client
@@ -56,11 +62,9 @@ class TestTruncationLogic(unittest.TestCase):
         self.assertEqual(path, "draft_fallback")
 
     def test_double_truncation_returns_marked_partial_answer(self):
-        final, _, was_truncated, path = self._ask([
-            _response("This is a truncated draft answer", "MAX_TOKENS"),
-            _response("This is a truncated verified text", "MAX_TOKENS"),
-            _response("This is a truncated verified text", "MAX_TOKENS"),
-        ])
+        final, _, was_truncated, path = self._ask(
+            _response("This is a truncated verified text", "MAX_TOKENS")
+        )
         self.assertIn("incomplete due to length constraints", final)
         self.assertTrue(was_truncated)
         self.assertEqual(path, "graceful_fallback")

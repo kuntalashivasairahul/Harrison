@@ -12,7 +12,7 @@
       ],
       "max_input_tokens": 12000,
       "max_output_tokens": 8192,
-      "timeout_seconds": 60,
+      "timeout_seconds": 30,
       "privacy": "configured_external_provider",
       "priority": 10
     },
@@ -55,9 +55,95 @@
       ],
       "max_input_tokens": 12000,
       "max_output_tokens": 8192,
-      "timeout_seconds": 60,
+      "timeout_seconds": 25,
       "privacy": "configured_external_provider",
       "priority": 20
+    },
+    {
+      "alias": "gemini-flash-3.7",
+      "provider": "gemini",
+      "model": "gemini-3.7-flash",
+      "enabled": false,
+      "stages": [
+        "draft"
+      ],
+      "max_input_tokens": 12000,
+      "max_output_tokens": 8192,
+      "timeout_seconds": 20,
+      "privacy": "configured_external_provider",
+      "priority": 21
+    },
+    {
+      "alias": "gemini-flash-3.6",
+      "provider": "gemini",
+      "model": "gemini-3.6-flash",
+      "enabled": true,
+      "stages": [
+        "draft",
+        "verifier"
+      ],
+      "max_input_tokens": 12000,
+      "max_output_tokens": 8192,
+      "timeout_seconds": 20,
+      "privacy": "configured_external_provider",
+      "priority": 25
+    },
+    {
+      "alias": "gemini-flash-3",
+      "provider": "gemini",
+      "model": "gemini-3-flash-preview",
+      "enabled": true,
+      "stages": [
+        "draft",
+        "verifier"
+      ],
+      "max_input_tokens": 12000,
+      "max_output_tokens": 8192,
+      "timeout_seconds": 20,
+      "privacy": "configured_external_provider",
+      "priority": 26
+    },
+    {
+      "alias": "mistral-draft",
+      "provider": "mistral",
+      "model": "mistral-large-latest",
+      "enabled": true,
+      "stages": [
+        "draft"
+      ],
+      "max_input_tokens": 100000,
+      "max_output_tokens": 8192,
+      "timeout_seconds": 30,
+      "privacy": "configured_external_provider",
+      "priority": 22
+    },
+    {
+      "alias": "groq-draft",
+      "provider": "groq",
+      "model": "openai/gpt-oss-120b",
+      "enabled": true,
+      "stages": [
+        "draft"
+      ],
+      "max_input_tokens": 5000,
+      "max_output_tokens": 2500,
+      "timeout_seconds": 20,
+      "privacy": "configured_external_provider",
+      "priority": 30
+    },
+    {
+      "alias": "mistral-verifier",
+      "provider": "mistral",
+      "model": "mistral-medium-latest",
+      "enabled": true,
+      "stages": [
+        "verifier"
+      ],
+      "max_input_tokens": 100000,
+      "max_output_tokens": 8192,
+      "timeout_seconds": 20,
+      "privacy": "configured_external_provider",
+      "priority": 27
     }
   ]
 }

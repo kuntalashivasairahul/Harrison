@@ -34,6 +34,19 @@ class TestGroqProvider(unittest.TestCase):
         self.assertEqual(result.finish_reason, "STOP")
         self.assertEqual(result.input_tokens, 12)
 
+    def test_openai_style_length_reads_as_truncated(self) -> None:
+        """Groq speaks OpenAI's dialect too — "length", never "MAX_TOKENS"."""
+        response = MagicMock()
+        response.id = "req-1"
+        response.usage.prompt_tokens = 12
+        response.usage.completion_tokens = 32
+        response.choices = [MagicMock(message=MagicMock(content="cut off mid-"), finish_reason="length")]
+        client = MagicMock()
+        client.chat.completions.create.return_value = response
+        with patch.dict("os.environ", {"GROQ_API_KEY": "key"}, clear=False), patch("backend.llm.groq_provider.Groq", return_value=client):
+            result = GroqProvider().generate(self._request(), "model")
+        self.assertTrue(result.truncated)
+
     def test_429_is_rate_limited(self) -> None:
         client = MagicMock()
         client.chat.completions.create.side_effect = RuntimeError("429 retry-after: 7")
@@ -107,3 +120,20 @@ class TestOptimizerModelIsLive(unittest.TestCase):
         from backend.llm.router import load_registry
 
         self.assertGreaterEqual(load_registry()["groq-optimizer"].max_output_tokens, _MAX_TOKENS)
+
+
+class TestGroqTokenPerMinuteRejection(unittest.TestCase):
+    """Groq answers an over-budget prompt with HTTP 413 code=rate_limit_exceeded.
+    That spelling matched none of the spaced rate-limit markers, so it
+    normalized to UNKNOWN and the draft stage stopped instead of failing over."""
+
+    def test_413_rate_limit_exceeded_is_categorized_as_rate_limited(self) -> None:
+        from backend.llm.gemini_provider import normalize_provider_error
+
+        exc = Exception(
+            "Error code: 413 - {'error': {'message': 'Request too large for model "
+            "`openai/gpt-oss-120b` ... on tokens per minute (TPM): Limit 8000, "
+            "Requested 11554', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}"
+        )
+        normalized = normalize_provider_error(exc, "groq")
+        self.assertEqual(normalized.category, LLMErrorCategory.RATE_LIMITED)

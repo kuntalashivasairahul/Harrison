@@ -1,0 +1,103 @@
+{
+  "$name": "HarrisonGPT — Clinical Print",
+  "$version": "1.0.0",
+  "$description": "Design tokens for the HarrisonGPT frontend. The UI renders beside scans of printed Harrison's pages served from /pages/*, so the ground is warm paper rather than white and the ink is warm-neutral rather than black.",
+
+  "color": {
+    "paper":   { "value": "#FAF8F4", "use": "app background — warm so page scans don't read as dingy grey" },
+    "surface": { "value": "#FFFFFF", "use": "answer column, panels that must lift off the paper" },
+    "well":    { "value": "#F3EFE8", "use": "recessed areas: page-scan rail, code, evidence blocks" },
+
+    "ink": {
+      "900": { "value": "#1A1714", "contrast_on_paper": "16.83:1", "use": "headings" },
+      "700": { "value": "#3D3630", "contrast_on_paper": "11.19:1", "use": "answer body prose" },
+      "500": { "value": "#6B6259", "contrast_on_paper": "5.63:1",  "use": "secondary UI text, labels" },
+      "300": { "value": "#786E62", "contrast_on_paper": "4.71:1",  "use": "tertiary: page labels, timings, meta" },
+      "100": { "value": "#E5DFD6", "contrast_on_paper": "1.25:1",  "use": "1px borders — NOT text" },
+      "050": { "value": "#F0EBE3", "contrast_on_paper": "1.10:1",  "use": "subtle fills, refusal panel ground" }
+    },
+
+    "accent": {
+      "700": { "value": "#6E1F26", "use": "pressed / active" },
+      "600": { "value": "#8B2635", "contrast_on_paper": "8.16:1", "use": "citations, links, primary button — Harrison oxblood" },
+      "100": { "value": "#F6E9E9", "use": "citation chip hover fill, tint backgrounds" }
+    },
+
+    "confidence": {
+      "$rule": "Deliberately NOT in the accent family. Confidence must never be confused with a link or a brand element, and must never be signalled by colour alone — every state carries a glyph and a word.",
+      "high":   { "fg": "#2D6A4F", "bg": "#E6F0EA", "contrast": "5.48:1", "glyph": "●●●" },
+      "medium": { "fg": "#8A5A00", "bg": "#F7EDDA", "contrast": "5.10:1", "glyph": "●●○" },
+      "low":    { "fg": "#55606B", "bg": "#EDEEF0", "contrast": "5.53:1", "glyph": "●○○",
+                  "note": "Slate, not red. Low confidence is uncertainty, not an error — red over-signals and would collide with the oxblood accent." }
+    },
+
+    "refusal": {
+      "$rule": "REFUSAL_STR is rendered verbatim and unsoftened (CODING_RULES 3.2). It is a distinct state, not a low-confidence answer.",
+      "fg": "#3D3630", "bg": "#F0EBE3", "rule": "#6B6259", "contrast": "10.01:1"
+    },
+
+    "focus": { "value": "#8B2635", "width": "2px", "offset": "2px" }
+  },
+
+  "typography": {
+    "$rule": "System stacks only — no webfont download. The answer is textbook prose set beside a scanned textbook page, so it is serif; UI chrome is sans; anything numeric or page-referencing is mono.",
+    "family": {
+      "serif": "Charter, \"Bitstream Charter\", \"Iowan Old Style\", \"Source Serif 4\", Georgia, serif",
+      "sans":  "-apple-system, BlinkMacSystemFont, \"Segoe UI\", Inter, Roboto, sans-serif",
+      "mono":  "ui-monospace, SFMono-Regular, \"SF Mono\", Menlo, Consolas, monospace"
+    },
+    "scale": {
+      "display": { "size": "30px", "line": "36px", "weight": 600, "family": "sans",  "use": "app title" },
+      "h1":      { "size": "21px", "line": "28px", "weight": 600, "family": "sans",  "use": "### headings from smart_summary" },
+      "h2":      { "size": "18px", "line": "26px", "weight": 600, "family": "sans" },
+      "body":    { "size": "17px", "line": "28px", "weight": 400, "family": "serif", "use": "answer prose — 17px, not 14px; this is read, not scanned" },
+      "ui":      { "size": "15px", "line": "22px", "weight": 400, "family": "sans" },
+      "small":   { "size": "13px", "line": "18px", "weight": 400, "family": "sans" },
+      "micro":   { "size": "11px", "line": "16px", "weight": 500, "family": "mono", "use": "page labels, stage timings" }
+    },
+    "measure": { "value": "68ch", "use": "hard max-width on the answer column" }
+  },
+
+  "space": {
+    "$base": "4px",
+    "1": "4px", "2": "8px", "3": "12px", "4": "16px",
+    "6": "24px", "8": "32px", "12": "48px", "16": "64px"
+  },
+
+  "radius": {
+    "$rule": "Rounding is meaningful, not decorative. A book page is a rectangle — rounding a scan is a lie about the artefact.",
+    "none": { "value": "0",    "use": "page-scan images, table cells" },
+    "sm":   { "value": "3px",  "use": "chips, buttons, inputs" },
+    "md":   { "value": "6px",  "use": "cards, panels, the answer column" },
+    "full": { "value": "999px","use": "the confidence dot ONLY" }
+  },
+
+  "elevation": {
+    "$rule": "Paper does not float. Structure comes from 1px ink-100 borders, not shadows. Exactly one shadow exists in the system.",
+    "flat":     { "value": "none", "border": "1px solid #E5DFD6" },
+    "lightbox": { "value": "0 8px 40px rgba(26,23,20,0.28)", "use": "full-page-scan overlay only" }
+  },
+
+  "motion": {
+    "$rule": "No scroll-triggered animation. One looping animation exists — the wait skeleton — because /ask blocks for 10-40s with no token stream.",
+    "fast":     { "duration": "120ms", "easing": "cubic-bezier(0.4,0,0.2,1)", "use": "hover, focus" },
+    "modal":    { "duration": "180ms", "easing": "cubic-bezier(0.4,0,0.2,1)", "use": "lightbox" },
+    "skeleton": { "duration": "1400ms", "easing": "ease-in-out", "use": "pipeline wait state" },
+    "reduced_motion": "All durations collapse to 0ms under prefers-reduced-motion; the skeleton becomes a static bar."
+  },
+
+  "layout": {
+    "breakpoints": { "sm": "640px", "md": "900px", "lg": "1200px" },
+    "split": {
+      "$rule": "Below md the right rail collapses; citations open the scan in a sheet instead of scrolling a rail.",
+      "answer_col": "minmax(0, 68ch)",
+      "scan_rail": "clamp(260px, 32vw, 380px)"
+    },
+    "touch_target": { "value": "44px", "exception": "Inline citation chips sit in prose at ~24px and cannot be 44px without breaking leading. They are mirrored in the full-size source list below the answer, which meets 44px." }
+  },
+
+  "dark_mode": {
+    "status": "deferred — deliberately not shipped in v1",
+    "reason": "Every page scan is white paper. In a dark shell they glow like lightboxes and dominate the layout. Shipping it half-done is worse than not shipping it. All values already route through tokens, so adding it later is one [data-theme] block, not a refactor. It will need filter: brightness(.88) contrast(1.05) on scan wells."
+  }
+}

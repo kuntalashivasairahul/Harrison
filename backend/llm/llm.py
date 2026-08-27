@@ -5,9 +5,7 @@ import logging
 import os
 import threading
 import time
-from pathlib import Path
 
-from dotenv import load_dotenv
 from google import genai
 from google.genai import types  # noqa: F401  (patched by tests)
 
@@ -15,11 +13,7 @@ from backend.config import LLM_DRAFT_DEADLINE_SECONDS, LLM_VERIFIER_DEADLINE_SEC
 from backend.llm.contracts import LLMError, LLMErrorCategory, LLMRequest, LLMStage
 from backend.llm.gemini_provider import GeminiProvider
 from backend.llm.router import LLMRouter
-
-# --------------------------------------------------------------------
-# ENV LOADING
-# --------------------------------------------------------------------
-load_dotenv(Path(__file__).resolve().parents[1] / ".env")
+from backend.observability import remaining_budget
 
 log = logging.getLogger(__name__)
 
@@ -63,7 +57,13 @@ class KeyManager:
         self._keys: list[str] = []
         self._current_idx: int = -1          # -1 so first next_client() → key[0]
         self._exhausted: set[int] = set()    # indices of permanently unusable keys
-        self._rate_limited_until: dict[int, float] = {}
+        # Keyed by (key index, model). Gemini free-tier quota is metered per
+        # project *per model*, and the nine keys are nine projects, so a 429 on
+        # gemini-2.5-flash says nothing about the same key's 500/day allowance
+        # on gemini-3.5-flash-lite. Keying this by index alone benched the whole
+        # key -- and every other model on it -- for the cooldown.
+        self._rate_limited_until: dict[tuple[int, str], float] = {}
+        self._current_model: str = ""
 
         # Main key first, then explicit numbered slots in deterministic order.
         main_key = os.getenv("GEMINI_API_KEY", "").strip()
@@ -91,23 +91,23 @@ class KeyManager:
 
     @property
     def available_key_count(self) -> int:
-        """Number of keys currently eligible to serve a request."""
+        """Number of keys currently eligible to serve the model last routed to."""
         with self._lock:
             now = time.monotonic()
             return sum(
                 1
                 for idx in range(len(self._keys))
-                if self._is_available(idx, now)
+                if self._is_available(idx, now, self._current_model)
             )
 
     def has_keys(self) -> bool:
         """Return True if at least one key is currently available."""
         return self.available_key_count > 0
 
-    def _is_available(self, idx: int, now: float) -> bool:
+    def _is_available(self, idx: int, now: float, model: str = "") -> bool:
         if idx in self._exhausted:
             return False
-        rate_limited_until = getattr(self, "_rate_limited_until", {}).get(idx, 0.0)
+        rate_limited_until = getattr(self, "_rate_limited_until", {}).get((idx, model), 0.0)
         return rate_limited_until <= now
 
     def get_current_key(self) -> str | None:
@@ -116,11 +116,13 @@ class KeyManager:
             return None
         return self._keys[self._current_idx]
 
-    def next_client(self) -> genai.Client:
+    def next_client(self, model: str = "") -> genai.Client:
         """Round-robin: advance cursor to the next currently eligible key.
 
         Distributes load evenly across all available keys. Skips permanently
-        exhausted keys and keys that are still inside a rate-limit cooldown.
+        exhausted keys and keys still inside a rate-limit cooldown *for this
+        model* -- quota is metered per project per model, so a key that is out
+        of daily requests on one model is untouched on the next one.
 
         Raises
         ------
@@ -134,10 +136,11 @@ class KeyManager:
             total = len(self._keys)
             start = self._current_idx
             now = time.monotonic()
+            self._current_model = model
             for _ in range(total):
                 candidate = (start + 1) % total
                 start = candidate
-                if self._is_available(candidate, now):
+                if self._is_available(candidate, now, model):
                     self._current_idx = candidate
                     log.debug(
                         "KeyManager: using key #%d/%d.",
@@ -147,8 +150,9 @@ class KeyManager:
                     return genai.Client(api_key=self._keys[candidate])
 
             raise RuntimeError(
-                f"KeyManager: No eligible Gemini API key is currently available "
-                f"({len(self._exhausted)} permanently exhausted; remaining keys are rate-limited)."
+                f"KeyManager: No eligible Gemini API key is currently available for "
+                f"{model or 'this model'} ({len(self._exhausted)} permanently exhausted; "
+                f"remaining keys are rate-limited)."
             )
 
     def make_client(self) -> genai.Client:
@@ -183,8 +187,14 @@ class KeyManager:
                     len(self._keys),
                 )
 
-    def mark_rate_limited(self, cooldown_seconds: float | None = None) -> None:
-        """Temporarily remove the current key after a 429 / quota response."""
+    def mark_rate_limited(
+        self, cooldown_seconds: float | None = None, model: str | None = None
+    ) -> None:
+        """Temporarily remove the current key *for one model* after a 429.
+
+        ``model`` defaults to whatever ``next_client()`` last handed a client
+        out for, which is the model that just failed.
+        """
         cooldown = (
             self.DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS
             if cooldown_seconds is None
@@ -194,18 +204,21 @@ class KeyManager:
             idx = self._current_idx
             if idx < 0 or idx >= len(self._keys):
                 return
+            scope = self._current_model if model is None else model
             until = time.monotonic() + cooldown
-            existing_until = self._rate_limited_until.get(idx, 0.0)
-            self._rate_limited_until[idx] = max(existing_until, until)
+            existing_until = self._rate_limited_until.get((idx, scope), 0.0)
+            self._rate_limited_until[(idx, scope)] = max(existing_until, until)
             available_count = sum(
                 1
                 for candidate in range(len(self._keys))
-                if self._is_available(candidate, time.monotonic())
+                if self._is_available(candidate, time.monotonic(), scope)
             )
             log.warning(
-                "KeyManager: key #%d/%d rate-limited for %.0fs (%d/%d keys available).",
+                "KeyManager: key #%d/%d rate-limited on %s for %.0fs "
+                "(%d/%d keys available for that model).",
                 idx + 1,
                 len(self._keys),
+                scope or "(unknown model)",
                 cooldown,
                 available_count,
                 len(self._keys),
@@ -225,12 +238,15 @@ key_manager = KeyManager()
 # --------------------------------------------------------------------
 
 # Priority lists: first match wins.  Highest-capability first.
+# Every entry probed against the live account on 2026-08-21: gemini-2.5-pro,
+# gemini-2.0-flash, gemini-1.5-pro and gemini-1.5-flash had all been retired and
+# 404'd, leaving this list one retirement away from the _BACKUP_PRIORITY outage
+# described below. Pro is unavailable on the free tier at all (0 RPD).
 _PROD_PRIORITY = [
     "gemini-2.5-flash",
-    "gemini-2.5-pro",
-    "gemini-2.0-flash",
-    "gemini-1.5-pro",
-    "gemini-1.5-flash",
+    "gemini-3.5-flash",
+    "gemini-3.7-flash",
+    "gemini-3.6-flash",
 ]
 
 # Cheap, fast models for the optimizer-fallback deployment.
@@ -248,6 +264,13 @@ _BACKUP_PRIORITY = [
     "gemini-3.5-flash",
 ]
 
+#: Full-strength Flash models pinned as their own registry deployments
+#: (gemini-flash-3.7 / -3.6 / -3), so they are named here only as documentation
+#: of the tier. Free tier gives each 20 requests/day *per project*, and the nine
+#: keys are nine projects, so the draft chain is worth 5 x 20 x 9 = 900/day.
+#: "gemini-3-flash-preview" is the API id behind the console's "Gemini 3 Flash"
+#: row; the bare "gemini-3-flash" 404s.
+
 # Safe hardcoded defaults
 _DEFAULT_PROD = "gemini-2.5-flash"
 _DEFAULT_BACKUP = "gemini-3.5-flash-lite"
@@ -258,7 +281,6 @@ _DEFAULT_BACKUP = "gemini-3.5-flash-lite"
 # same-family sibling is the cheapest real resilience available.
 _DRAFT_FALLBACK_PRIORITY = [
     "gemini-3.5-flash",
-    "gemini-3.6-flash",
     "gemini-2.5-flash",
 ]
 _DEFAULT_DRAFT_FALLBACK = "gemini-3.5-flash"
@@ -450,9 +472,30 @@ _RETRYABLE = {
 LLM_RETRY_BACKOFF_SECONDS = float(os.getenv("LLM_RETRY_BACKOFF_SECONDS", "1.5"))
 
 
+#: Floor for a clamped stage deadline. Below this the call cannot complete
+#: anyway, and a sub-second timeout just burns a provider round-trip.
+_MIN_STAGE_DEADLINE_SECONDS = 1.0
+
+
+def _stage_deadline(default: float) -> float:
+    """Clamp a stage deadline to whatever is left of the request budget."""
+    remaining = remaining_budget()
+    if remaining is None:
+        return default
+    return max(_MIN_STAGE_DEADLINE_SECONDS, min(default, remaining))
+
+
 def _handle_retryable(exc: LLMError, attempt: int, max_attempts: int, stage: str) -> bool:
     """Return True if the caller should retry. Applies the right recovery."""
     if exc.category not in _RETRYABLE or attempt >= max_attempts - 1:
+        return False
+
+    remaining = remaining_budget()
+    if remaining is not None and remaining <= 0:
+        log.warning(
+            "%s: request budget exhausted after attempt %d/%d — not retrying.",
+            stage, attempt + 1, max_attempts,
+        )
         return False
 
     if exc.category is LLMErrorCategory.RATE_LIMITED:
@@ -460,7 +503,7 @@ def _handle_retryable(exc: LLMError, attempt: int, max_attempts: int, stage: str
             "%s: quota error on attempt %d/%d — cooling down key and rotating.",
             stage, attempt + 1, max_attempts,
         )
-        key_manager.mark_rate_limited(exc.retry_after_seconds)
+        key_manager.mark_rate_limited(exc.retry_after_seconds, model=exc.model)
         return True
 
     delay = exc.retry_after_seconds or LLM_RETRY_BACKOFF_SECONDS * (2 ** attempt)
@@ -556,7 +599,12 @@ llm_router = LLMRouter(gemini_provider, prod_model, backup_model, draft_fallback
 # further tokens on an internal reasoning pass for the draft. At 3,000 the
 # draft hit MAX_TOKENS on ordinary clinical topics and was returned truncated.
 SMART_SUMMARY_MAX_TOKENS = int(os.getenv("SMART_SUMMARY_MAX_TOKENS", "8000"))
-QA_MAX_TOKENS = int(os.getenv("QA_MAX_TOKENS", "3000"))
+# 3,000 was set before the 3.x deployments landed. Those models reason far more
+# freely, and the reasoning pass is charged to the same max_output_tokens as the
+# answer — a live qa draft on gemini-3-flash-preview came back MAX_TOKENS inside
+# the old ceiling with the answer half-written. 4,096 leaves the answer its room
+# without approaching the 8,192 registry cap.
+QA_MAX_TOKENS = int(os.getenv("QA_MAX_TOKENS", "4096"))
 # SMART_SUMMARY_CONTEXT_CHAR_LIMIT lives in backend/utils/fusion.py, which is
 # the module that actually applies it.  It was read here and never used.
 
@@ -576,6 +624,7 @@ def verify_answer(
     model: str | None = None,
     compact_prompt: bool = False,
     max_output_tokens: int | None = None,
+    drafted_by_model: str | None = None,
 ) -> tuple[str, bool, bool]:
     """
     Post-hoc verification step that checks the draft answer against
@@ -583,6 +632,15 @@ def verify_answer(
     explanations and detail whenever possible.
 
     Includes automatic API key rotation on 429 / Quota-Exceeded errors.
+
+    Parameters
+    ----------
+    drafted_by_model
+        Model that produced ``answer``.  It is excluded from the verifier
+        stage, because a model grading its own draft is the least likely to
+        catch its own ungrounded claim -- CODING_RULES §6.1 forbids
+        self-verification.  ``None`` keeps the previous behaviour and is only
+        correct when the caller genuinely does not know the drafter.
 
     Returns
     -------
@@ -651,16 +709,18 @@ def verify_answer(
                 model_alias="gemini-primary",
                 temperature=0.0,
                 max_output_tokens=max_tokens,
-                deadline_seconds=LLM_VERIFIER_DEADLINE_SECONDS,
+                deadline_seconds=_stage_deadline(LLM_VERIFIER_DEADLINE_SECONDS),
                 stage=LLMStage.VERIFIER,
             )
             result = (
                 llm_router.generate_named(request, "gemini-primary", model_override=model)
                 if model is not None
-                else llm_router.generate_for_stage(request, LLMStage.VERIFIER)
+                else llm_router.generate_for_stage(
+                    request, LLMStage.VERIFIER, exclude_model=drafted_by_model
+                )
             )
             verified = result.text
-            truncated = result.finish_reason == "MAX_TOKENS"
+            truncated = result.truncated
 
             if not verified:
                 return answer, truncated, True
@@ -827,12 +887,19 @@ def ask_llm(
          "verified"          -- verified answer, verifier ran to completion
          "draft_fallback"    -- verifier truncated or disabled, complete draft returned
          "graceful_fallback" -- both draft and verifier truncated
-         "error_fallback"    -- all retries exhausted (API/quota failure)
+         "no_grounding"      -- retrieval produced no usable context; the corpus
+                                or the rerank filter, not the provider, is why
+         "provider_failure"  -- the model returned nothing, or all retries were
+                                exhausted (API/quota/outage)
+
+         The last two were one "error_fallback" path, which made a corpus gap
+         and a provider outage indistinguishable in /metrics and in the logs --
+         the two failures with the most different remedies.
     """
     import time
 
     if not fused_context or len(fused_context.strip()) < 20:
-        return REFUSAL_STR, "", False, "error_fallback"
+        return REFUSAL_STR, "", False, "no_grounding"
 
     mode = (mode or "qa").strip().lower()
     generation_max_tokens = (
@@ -868,7 +935,7 @@ def ask_llm(
                 model_alias="gemini-primary",
                 temperature=0.2,
                 max_output_tokens=generation_max_tokens,
-                deadline_seconds=LLM_DRAFT_DEADLINE_SECONDS,
+                deadline_seconds=_stage_deadline(LLM_DRAFT_DEADLINE_SECONDS),
                 stage=LLMStage.DRAFT,
             )
             # An explicit model= pins one deployment (tests, scripts). Otherwise
@@ -884,10 +951,10 @@ def ask_llm(
                 timings["draft_generation"] = timings.get("draft_generation", 0.0) + (t_gen_end - t_gen_start)
 
             content = result.text
-            draft_truncated = result.finish_reason == "MAX_TOKENS"
+            draft_truncated = result.truncated
 
             if not content:
-                return REFUSAL_STR, "", False, "error_fallback"
+                return REFUSAL_STR, "", False, "provider_failure"
 
             if draft_truncated:
                 log.warning(
@@ -897,7 +964,7 @@ def ask_llm(
                     DRAFT_MAX_ATTEMPTS,
                 )
                 content += (
-                    "\n\n> ⚠️ *Answer truncated — token budget reached. "
+                    "\n\n> **Note:** *Answer truncated — token budget reached. "
                     "Try a more specific query or split into sub-questions.*"
                 )
 
@@ -922,7 +989,13 @@ def ask_llm(
 
             # Verification pass
             t_verify_start = time.perf_counter()
-            verified, verifier_truncated, verification_ran = verify_answer(draft_answer, fused_context, mode=mode, model=model)
+            # result.model is the model that actually served the draft after
+            # failover, not the one the priority order started with, so it is
+            # the only value that keeps the verifier independent.
+            verified, verifier_truncated, verification_ran = verify_answer(
+                draft_answer, fused_context, mode=mode, model=model,
+                drafted_by_model=result.model,
+            )
             t_verify_end = time.perf_counter()
             if timings is not None:
                 timings["verification"] = t_verify_end - t_verify_start
@@ -942,6 +1015,7 @@ def ask_llm(
                     model=model,
                     compact_prompt=True,
                     max_output_tokens=generation_max_tokens,
+                    drafted_by_model=result.model,
                 )
                 t_retry_end = time.perf_counter()
                 if timings is not None:
@@ -979,7 +1053,7 @@ def ask_llm(
                     # Both draft and verified are truncated, return graceful fallback or clearly marked partial
                     final_answer = (
                         verified.strip()
-                        + "\n\n> ⚠️ *Answer verification was incomplete due to length constraints.*"
+                        + "\n\n> **Note:** *Answer verification was incomplete due to length constraints.*"
                     )
                     was_truncated = True
                     returned_path = "graceful_fallback"
@@ -1016,4 +1090,4 @@ def ask_llm(
     return (
         "I'm unable to generate a complete answer at this time due to a temporary service issue. "
         "Please try again in a few moments. If the problem persists, try a more specific query."
-    ), "", True, "error_fallback"
+    ), "", True, "provider_failure"

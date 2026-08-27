@@ -14,31 +14,46 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
+
+# backend.config first: it loads backend/.env, and configure_logging() reads
+# HARRISON_LOG_LEVEL from the environment.  Imported the other way round, a log
+# level set in .env was read before the file had been loaded and never applied.
+# This module imports nothing under backend/ and logs nothing, so it is safe
+# ahead of configure_logging().
+from backend.config import (
+    ASSET_VERSION,
+    DEFAULT_K,
+    DEFAULT_RERANK_POOL,
+    EMBEDDING_DIM,
+    EMBEDDING_MODEL,
+    LLM_TOTAL_REQUEST_BUDGET_SECONDS,
+    RERANK_MODEL,
+    RERANK_SCORE_THRESHOLD,
+    RRF_K,
+)
 
 # Configure the "backend" logger before importing anything under it, so that
 # diagnostics emitted during module import are captured too.  See
 # backend/logging_config.py for why this is needed under uvicorn.
 from backend.logging_config import configure_logging
-from backend.observability import metrics, new_request_id, request_id_var
+from backend.observability import (
+    metrics,
+    new_request_id,
+    request_id_var,
+    start_request_budget,
+)
 
 configure_logging()
 
 log = logging.getLogger(__name__)
 
-from backend.agents.confidence_scorer import calculate_confidence
+from backend.agents.confidence_scorer import answer_declines, calculate_confidence
 from backend.agents.context_router import route_and_sort_context
 from backend.agents.query_optimizer import optimize_query
 from backend.agents.semantic_cache import SemanticCache
-from backend.config import (
-    DEFAULT_K,
-    DEFAULT_RERANK_POOL,
-    EMBEDDING_DIM,
-    EMBEDDING_MODEL,
-    RERANK_MODEL,
-    RERANK_SCORE_THRESHOLD,
-    RRF_K,
-)
+from backend.api.content.hero import HERO_STEPS, RAIL
 from backend.llm.llm import ask_llm, key_manager, llm_router, resolve_models
 from backend.processing.evidence import extract_evidence, extract_sources
 from backend.rendering.page_resolver import resolve_page_urls
@@ -202,16 +217,80 @@ _STORAGE_DIR = Path(__file__).resolve().parents[2] / "storage" / "pages"
 _STORAGE_DIR.mkdir(parents=True, exist_ok=True)   # ensure dir exists at startup
 app.mount("/pages", StaticFiles(directory=str(_STORAGE_DIR)), name="pages")
 
+# --------------------------------------------------------------------
+# WEB UI — Jinja templates + the design-system stylesheets.
+# Jinja2 is already present as a Starlette dependency, so this adds no new
+# package (CODING_RULES §6.1).  Both are path-resolution only at import: no
+# I/O, no network, nothing that would breach import-time purity.
+# --------------------------------------------------------------------
+_UI_DIR = Path(__file__).resolve().parent
+app.mount("/static", StaticFiles(directory=str(_UI_DIR / "static")), name="static")
+templates = Jinja2Templates(directory=str(_UI_DIR / "templates"))
+
+
+def _static(path: str) -> str:
+    """Root-relative URL for a static asset, cache-busted by ASSET_VERSION.
+
+    Deliberately not Starlette's ``url_for``: that returns an *absolute* URL
+    including scheme and host, so behind a TLS-terminating proxy that does not
+    set ``X-Forwarded-Proto`` every asset comes back ``http://`` on an
+    ``https://`` page and the browser blocks it as mixed content.  A
+    root-relative path cannot have that failure mode and cache-busts the same.
+
+    Must not be used for the importmap target — see the note in landing.html.
+    """
+    return f"/static/{path}?v={ASSET_VERSION}"
+
+
+templates.env.globals["static"] = _static
+
+
+@app.get("/", include_in_schema=False)
+def landing_page(request: Request):
+    """Marketing page.  Reads the corpus size from the already-warm index.
+
+    ``rag.chunks`` is forced by the lifespan handler, so this is a length check
+    on a loaded list rather than a load.  When the index is degraded it is
+    empty, and the page shows a dash instead of claiming zero passages.
+    """
+    count = len(rag.chunks) if isinstance(rag.chunks, list) else 0
+    return templates.TemplateResponse(
+        request=request,
+        name="landing.html",
+        context={
+            "chunk_count": f"{count:,}" if count else "\u2014",
+            "hero_steps": HERO_STEPS,
+            "rail": RAIL,
+        },
+    )
+
+
+@app.get("/chat", include_in_schema=False)
+def chat_page(request: Request):
+    """The ask interface.  Posts to /ask from the same origin, so the browser
+    never needs HARRISON_CORS_ORIGINS to be set."""
+    return templates.TemplateResponse(
+        request=request,
+        name="chat.html",
+        context={"max_query_chars": MAX_QUERY_CHARS},
+    )
+
+
 SMART_SUMMARY_K = int(os.getenv("SMART_SUMMARY_K", "48"))
 SMART_SUMMARY_FINAL_K = int(os.getenv("SMART_SUMMARY_FINAL_K", "12"))
 SMART_SUMMARY_RERANK_POOL = int(os.getenv("SMART_SUMMARY_RERANK_POOL", "16"))
-CACHE_SCHEMA_VERSION = "semantic-cache-v2"
+# Bumped to v4 with the groundedness floor below: a cached entry stores the
+# confidence that was computed when it was written, so the 14 answers already
+# on disk -- including the citation-free thyroid-storm refusal that shipped as
+# Medium -- would keep serving the pre-fix label forever.  The signature is an
+# exact-match gate, so bumping it retires them; they recompute on next ask.
+CACHE_SCHEMA_VERSION = "semantic-cache-v5"
 
 # --------------------------------------------------------------------
 # SEMANTIC CACHE — global singleton, loaded once at startup from disk.
 # Provides sub-100ms responses for repeated or near-identical queries.
 # --------------------------------------------------------------------
-_cache = SemanticCache()
+_cache = SemanticCache(schema_version=CACHE_SCHEMA_VERSION)
 
 
 def _vectorstore_fingerprint() -> dict[str, int | None]:
@@ -258,6 +337,26 @@ def _final_k_for(mode: str, complexity: str) -> int:
     if mode == "smart_summary":
         return min(dynamic_final_k, SMART_SUMMARY_FINAL_K)
     return dynamic_final_k
+
+
+def _candidate_signatures(*, mode: str, disable_verifier: bool) -> list[dict[str, Any]]:
+    """Every signature this request could legitimately hit.
+
+    ``final_k`` is the only signature field the query optimizer decides, via
+    ``complexity``, and it has exactly two possible values.  Probing both is a
+    pair of in-memory matmuls; waiting for the optimizer to tell us which one
+    to probe cost a full Groq round-trip on every cache hit.
+    """
+    candidates: list[dict[str, Any]] = []
+    for complexity in ("simple", "complex"):
+        signature = _cache_signature(
+            mode=mode,
+            disable_verifier=disable_verifier,
+            final_k=_final_k_for(mode, complexity),
+        )
+        if signature not in candidates:
+            candidates.append(signature)
+    return candidates
 
 
 def _should_save_to_cache(
@@ -332,8 +431,53 @@ def ask_question(req: QueryRequest, request: Request) -> QueryResponse:
     raw_query = req.query
     mode = req.mode
 
+    # Open the wall-clock budget for everything below.  Stage deadlines clamp
+    # against what is left of it and retries stop when it is spent.
+    start_request_budget(LLM_TOTAL_REQUEST_BUDGET_SECONDS)
+
     # ----------------------------------------------------------------
-    # 0️⃣  QueryOptimizer — pre-retrieval gatekeeper & context enhancer
+    # 0. Semantic Cache — probed before any LLM call
+    # ----------------------------------------------------------------
+    # This used to sit *behind* the optimizer, so every hit paid a full Groq
+    # round-trip (measured 697ms) to look up an answer already on disk.  The
+    # embedding is taken from the raw query rather than the expanded one for
+    # the same reason: the expansion is an LLM output, and keying on it makes
+    # the key unobtainable without the call the cache exists to avoid.
+    #
+    # A hit skips the non-medical gatekeeper, which is safe: only a query that
+    # already passed it can be in the cache, and the 0.95 similarity floor
+    # keeps a non-medical query from matching a medical entry.
+    query_embedding: list[float] = embed_text(raw_query).flatten().tolist()
+
+    for candidate in _candidate_signatures(mode=mode, disable_verifier=req.disable_verifier):
+        cached = _cache.check_cache(query_embedding, metadata=candidate)
+        if cached is None:
+            continue
+        total_time = time.perf_counter() - start_total
+        timings["total_request"] = total_time
+        log.info("ask_question: TIMINGS (cache hit)  total_request=%.3fs", total_time)
+        metrics.increment("ask_total")
+        metrics.increment("cache_hit")
+        metrics.observe_timings(timings)
+        # visual_context is rebuilt from the cached page labels against THIS
+        # request's host.  It used to be served straight from the cache, which
+        # baked in whichever host first populated the entry — serve the same
+        # cache behind a different hostname and every image link pointed at the
+        # old one.  base_url is deliberately not part of the cache signature;
+        # the labels are host-independent, the URLs are not.
+        return QueryResponse(
+            answer=cached["answer"],
+            confidence=cached["confidence"],
+            sources=cached["sources"],
+            visual_context=resolve_page_urls(
+                sources=cached.get("sources", []),
+                base_url=str(request.base_url).rstrip("/"),
+            ),
+            timings=timings,
+        )
+
+    # ----------------------------------------------------------------
+    # 1. QueryOptimizer — pre-retrieval gatekeeper & context enhancer
     # ----------------------------------------------------------------
     # The agent runs a fast LLM call (llama-3.1-8b-instant) to:
     #   a) Detect whether the query is medical in nature.
@@ -367,7 +511,9 @@ def ask_question(req: QueryRequest, request: Request) -> QueryResponse:
                 "answer clinical questions about diseases, diagnosis, treatment, and "
                 "pharmacology. Please rephrase your query as a medical question."
             ),
-            confidence="High",   # Highly confident this is out of scope.
+            # No chunks retrieved on this path — calculate_confidence()'s own
+            # guard clause floors that to "Low" instead of hardcoding a value.
+            confidence=calculate_confidence([], "", ""),
             sources=[],
             visual_context=[],
             timings=timings,
@@ -390,52 +536,15 @@ def ask_question(req: QueryRequest, request: Request) -> QueryResponse:
     # or failed LLM calls conservatively maximise recall.
     _complexity: str     = optimized.get("complexity", "complex")
     dynamic_final_k = _final_k_for(mode, _complexity)
+    # The signature the answer will actually be stored under.  The probe above
+    # tried both candidates; this is the one this request really used.
     cache_signature = _cache_signature(
         mode=mode,
         disable_verifier=req.disable_verifier,
         final_k=dynamic_final_k,
     )
 
-    # ----------------------------------------------------------------
-    # 1️⃣  Semantic Cache — check before any retrieval or LLM work
-    # ----------------------------------------------------------------
-    # embed_text() reuses the already-loaded retrieval embedding model.
-    # The vector is flattened to a plain list for JSON-serialisable storage.
-    query_embedding: list[float] = embed_text(search_query).flatten().tolist()
-
-    cached = _cache.check_cache(query_embedding, metadata=cache_signature)
-    if cached is not None:
-        # ── Cache HIT: return instantly, zero FAISS/Groq cost ──
-        total_time = time.perf_counter() - start_total
-        timings["total_request"] = total_time
-        log.info(
-            "ask_question: TIMINGS (cache hit)  total_request=%.3fs  optimizer=%.3fs",
-            total_time,
-            timings["optimizer"],
-        )
-        # visual_context is rebuilt from the cached page labels against THIS
-        # request's host.  It used to be served straight from the cache, which
-        # baked in whichever host first populated the entry — serve the same
-        # cache behind a different hostname and every image link pointed at the
-        # old one.  base_url is deliberately not part of the cache signature;
-        # the labels are host-independent, the URLs are not.
-        metrics.increment("ask_total")
-        metrics.increment("cache_hit")
-        metrics.observe_timings(timings)
-        return QueryResponse(
-            answer=cached["answer"],
-            confidence=cached["confidence"],
-            sources=cached["sources"],
-            visual_context=resolve_page_urls(
-                sources=cached.get("sources", []),
-                base_url=str(request.base_url).rstrip("/"),
-            ),
-            timings=timings,
-        )
-
-    # ── Cache MISS: run the full pipeline ──
-
-    # 2️⃣ Retrieve (final_k scaled by query complexity)
+    # 2. Retrieve (final_k scaled by query complexity)
     if mode == "smart_summary":
         retrieved_chunks = retrieve(
             search_query,
@@ -451,16 +560,16 @@ def ask_question(req: QueryRequest, request: Request) -> QueryResponse:
             timings=timings,
         )
 
-    # 2.5️⃣ ContextRouter — deduplicate & chronological sort
+    # 2.5. ContextRouter — deduplicate & chronological sort
     # Drops near-identical chunks (>90% overlap) and re-orders survivors
     # by ascending page number so the LLM reads Harrison sequentially.
     # Pure function: no LLM call, sub-millisecond, crash-safe.
     retrieved_chunks = route_and_sort_context(retrieved_chunks)
 
-    # 3️⃣ Fuse context
+    # 3. Fuse context
     fused_context = fuse_context(retrieved_chunks)
 
-    # 4️⃣ Extract structured evidence for the chunks the context could not carry.
+    # 4. Extract structured evidence for the chunks the context could not carry.
     #    Building both blocks from the same list sent every context chunk to the
     #    model twice; excluding them removes the duplication without losing a
     #    single chunk.
@@ -469,7 +578,7 @@ def ask_question(req: QueryRequest, request: Request) -> QueryResponse:
         exclude_chunk_ids=selected_chunk_ids(retrieved_chunks),
     )
 
-    # 5️⃣ Ask LLM
+    # 5. Ask LLM
     #    question= uses raw_query so the answer is phrased naturally for
     #    the user; the enriched context already reflects search_query.
     #    ask_llm() returns a 4-tuple: (final_answer, draft_answer, was_truncated, returned_path).
@@ -487,11 +596,11 @@ def ask_question(req: QueryRequest, request: Request) -> QueryResponse:
     # Phase 3 – populate confidence and sources from scoring pipeline.
     # ----------------------------------------------------------------
 
-    # 6️⃣ Extract unique, sorted page references for the sources field.
+    # 6. Extract unique, sorted page references for the sources field.
     #    Returns [] safely when retrieved_chunks is empty.
     sources: list[str] = extract_sources(retrieved_chunks)
 
-    # 7️⃣ Calculate the deterministic confidence label.
+    # 7. Calculate the deterministic confidence label.
     #    ConfidenceScorer combines two signals:
     #      a) Average Cross-Encoder score across all retrieved chunks
     #         (not just the top-1) for a richer retrieval quality estimate.
@@ -511,16 +620,38 @@ def ask_question(req: QueryRequest, request: Request) -> QueryResponse:
     #   verified          + truncated     → Medium max (draft was cut)
     #   draft_fallback    + any           → Medium max (verifier failed)
     #   graceful_fallback + any           → Low max (both layers failed)
-    #   error_fallback    + any           → Low max (all API retries failed)
+    #   no_grounding      + any           → Low max (no usable context)
+    #   provider_failure  + any           → Low max (API/quota/outage)
+    #   no [p:NNN] citation + any path    → Low max (answer is not grounded)
+    #   answer declines up front + any path → Low max (it is a refusal)
     #
-    # These are the only four paths ask_llm() returns; the table previously
-    # also handled a "partial_verified" path that nothing ever produced.
-    if returned_path in ("graceful_fallback", "error_fallback"):
+    # These are the only paths ask_llm() returns; the table previously also
+    # handled a "partial_verified" path that nothing ever produced.
+    if returned_path in ("graceful_fallback", "no_grounding", "provider_failure"):
         confidence = "Low"
     elif returned_path == "draft_fallback" and confidence == "High":
         confidence = "Medium"
     elif was_truncated and confidence == "High":
         confidence = "Medium"
+
+    # The rules above key off the *path*, which says how the answer was produced,
+    # not whether it ended up grounded.  When retrieval brings back plausible but
+    # off-target pages the model declines in its own words -- "The provided
+    # context does not contain information regarding the clinical features or
+    # management of thyroid storm" -- on the `verified` path, where none of the
+    # caps fire.  That shipped as Medium confidence with three Harrison pages and
+    # their thumbnails attached: a refusal dressed as a moderately confident
+    # answer, which is the wrong direction for this system to be wrong in.
+    # An answer carrying no citation is not grounded in the context, whatever
+    # path produced it.  REFUSAL_STR has no citation either and is already Low.
+    #
+    # Citation presence alone is too weak a test, though: re-running the thyroid
+    # storm query live returned "... are not detailed in the provided chapters"
+    # *with* a [p:3074] citation attached to a true but tangential fact about
+    # subacute thyroiditis, and it shipped Medium again.  A padded refusal is
+    # still a refusal, so ask the answer what it says about the context.
+    if "[p:" not in answer or answer_declines(answer):
+        confidence = "Low"
 
     # ── Consolidated request-level structured log (single grep-friendly line) ──
     log.info(
@@ -540,7 +671,7 @@ def ask_question(req: QueryRequest, request: Request) -> QueryResponse:
         raw_query,
     )
 
-    # 🔟 Resolve source page labels to image URLs.
+    # 10. Resolve source page labels to image URLs.
     #    base_url is derived from the live Request so this works on any
     #    host/port without hardcoding (localhost, staging, or production).
     base_url: str = str(request.base_url).rstrip("/")

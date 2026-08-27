@@ -10,8 +10,17 @@ Unit tests for the refactored KeyManager:
 from __future__ import annotations
 
 import threading
+import time
 import unittest
 from unittest.mock import MagicMock, patch
+
+# Imported here, not inside the tests.  backend/config.py loads backend/.env at
+# import time, so an import nested inside `patch.dict(..., clear=True)` refills
+# the environment the patch just emptied: run this file on its own and the first
+# test to trigger the import saw the developer's nine real keys instead of the
+# two it set.  Importing at module scope spends that side effect during
+# collection, before any patch is active.
+from backend.llm.llm import KeyManager
 
 # ---------------------------------------------------------------------------
 # Helpers to build a KeyManager from arbitrary key lists without env vars
@@ -19,9 +28,7 @@ from unittest.mock import MagicMock, patch
 
 def _make_km(*keys: str):
     """Create a KeyManager whose pool is exactly `keys`, bypassing env loading."""
-    from backend.llm.llm import KeyManager
     km = KeyManager.__new__(KeyManager)
-    import threading
     km._lock = threading.Lock()
     km._keys = list(keys)
     km._current_idx = -1
@@ -35,7 +42,14 @@ def _make_km(*keys: str):
 # ---------------------------------------------------------------------------
 
 class TestKeyLoading(unittest.TestCase):
-    """Main Gemini key plus deterministic GEMINI_API_KEY_1..10 loading."""
+    """Main Gemini key plus deterministic GEMINI_API_KEY_1..10 loading.
+
+    These construct a real KeyManager instead of replaying ``__init__`` inline.
+    The hand-rolled copy had drifted from the real thing -- it fell back to
+    GEMINI_API_KEY for slot 1, which production has never done -- so it was
+    asserting behaviour no shipped code had.  The constructor only reads env
+    and logs; it builds no client, so this stays hermetic.
+    """
 
     def test_explicit_slots_loaded_in_order(self):
         env = {
@@ -44,53 +58,20 @@ class TestKeyLoading(unittest.TestCase):
             "GEMINI_API_KEY_2": "key-b",
         }
         with patch.dict("os.environ", env, clear=True):
-            # Re-create a fresh instance (don't reload the module — singleton)
-            from backend.llm.llm import KeyManager
-            km = KeyManager.__new__(KeyManager)
-            import threading
-            km._lock = threading.Lock()
-            km._keys = []
-            km._current_idx = -1
-            km._exhausted = set()
-            # Manually run __init__ body
-            import os
-            for slot in range(1, KeyManager.TOTAL_SLOTS + 1):
-                val = os.getenv(f"GEMINI_API_KEY_{slot}", "").strip()
-                if not val and slot == 1:
-                    val = os.getenv("GEMINI_API_KEY", "").strip()
-                if val:
-                    km._keys.append(val)
+            km = KeyManager()
         self.assertEqual(km._keys, ["key-a", "key-b", "key-c"])
 
     def test_main_key_is_loaded_before_numbered_keys(self):
-        env = {"GEMINI_API_KEY": "bare-key"}
-        with patch.dict("os.environ", env, clear=True):
-            import os
-            import threading
-
-            from backend.llm.llm import KeyManager
-            km = KeyManager.__new__(KeyManager)
-            km._lock = threading.Lock()
-            km._keys = []
-            km._current_idx = -1
-            km._exhausted = set()
-            main_key = os.getenv("GEMINI_API_KEY", "").strip()
-            if main_key:
-                km._keys.append(main_key)
-            for slot in range(1, KeyManager.TOTAL_SLOTS + 1):
-                val = os.getenv(f"GEMINI_API_KEY_{slot}", "").strip()
-                if val:
-                    km._keys.append(val)
+        with patch.dict("os.environ", {"GEMINI_API_KEY": "bare-key"}, clear=True):
+            km = KeyManager()
         self.assertEqual(km._keys, ["bare-key"])
 
     def test_main_key_and_slot_one_are_distinct(self):
         with patch.dict("os.environ", {"GEMINI_API_KEY": "main", "GEMINI_API_KEY_1": "slot-one"}, clear=True):
-            from backend.llm.llm import KeyManager
             km = KeyManager()
         self.assertEqual(km._keys, ["main", "slot-one"])
 
     def test_total_slots_is_10(self):
-        from backend.llm.llm import KeyManager
         self.assertEqual(KeyManager.TOTAL_SLOTS, 10)
 
     def test_empty_slots_skipped_gracefully(self):
@@ -100,25 +81,8 @@ class TestKeyLoading(unittest.TestCase):
             "GEMINI_API_KEY_5": "key-5",
         }
         with patch.dict("os.environ", env, clear=True):
-            import os
-            import threading
-
-            from backend.llm.llm import KeyManager
-            km = KeyManager.__new__(KeyManager)
-            km._lock = threading.Lock()
-            km._keys = []
-            km._current_idx = -1
-            km._exhausted = set()
-            main_key = os.getenv("GEMINI_API_KEY", "").strip()
-            if main_key:
-                km._keys.append(main_key)
-            for slot in range(1, KeyManager.TOTAL_SLOTS + 1):
-                val = os.getenv(f"GEMINI_API_KEY_{slot}", "").strip()
-                if val:
-                    km._keys.append(val)
-        self.assertEqual(len(km._keys), 2)
-        self.assertEqual(km._keys[0], "key-1")
-        self.assertEqual(km._keys[1], "key-5")
+            km = KeyManager()
+        self.assertEqual(km._keys, ["key-1", "key-5"])
 
 
 class TestRoundRobin(unittest.TestCase):
@@ -214,8 +178,44 @@ class TestRateLimitCooldown(unittest.TestCase):
         self.assertEqual(second.api_key, "k1")
         self.assertEqual(km.available_key_count, 1)
 
-        km._rate_limited_until[0] = 0.0
+        km._rate_limited_until[(0, "")] = 0.0
         self.assertEqual(km.available_key_count, 2)
+
+    def test_cooldown_follows_the_error_not_the_global_cursor(self):
+        """mark_rate_limited() infers the model from the last next_client()
+        call, which is process-global: a concurrent request on another model
+        can advance it between the failure and the cooldown. The model carried
+        on the LLMError is the one that actually 429'd."""
+        km = _make_km("k0", "k1")
+        with patch("backend.llm.llm.genai.Client", side_effect=lambda api_key: MagicMock(api_key=api_key)):
+            km.next_client("gemini-2.5-flash")
+            km._current_model = "gemini-3.6-flash"    # a racing request wins
+            km.mark_rate_limited(cooldown_seconds=60, model="gemini-2.5-flash")
+
+        now = time.monotonic()
+        self.assertFalse(km._is_available(0, now, "gemini-2.5-flash"))
+        self.assertTrue(km._is_available(0, now, "gemini-3.6-flash"))
+
+    def test_a_429_on_one_model_leaves_the_key_usable_on_another(self):
+        """Free-tier quota is metered per project per model, and each key is a
+        separate project. Keying the cooldown by key index alone benched all of
+        a key's other models -- including Flash-Lite's 500/day -- for a 429 that
+        only exhausted one model's 20/day."""
+        km = _make_km("k0", "k1")
+        with patch("backend.llm.llm.genai.Client", side_effect=lambda api_key: MagicMock(api_key=api_key)):
+            first = km.next_client("gemini-2.5-flash")
+            self.assertEqual(first.api_key, "k0")
+            km.mark_rate_limited(cooldown_seconds=60)
+
+            # Same key, different model: still eligible.
+            self.assertTrue(km._is_available(0, time.monotonic(), "gemini-3.5-flash-lite"))
+            self.assertFalse(km._is_available(0, time.monotonic(), "gemini-2.5-flash"))
+
+            # Rotation on the exhausted model skips it; on a fresh model it does not.
+            km._current_idx = -1
+            self.assertEqual(km.next_client("gemini-2.5-flash").api_key, "k1")
+            km._current_idx = -1
+            self.assertEqual(km.next_client("gemini-3.5-flash-lite").api_key, "k0")
 
 
 class TestMakeClient(unittest.TestCase):

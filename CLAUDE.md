@@ -36,7 +36,7 @@ virtualenv; if you find one, it is a mistake.
 
 ```bash
 ./scripts/setup_env.sh                        # creates .venv312, installs runtime + dev deps
-.venv312/bin/python -m pytest                 # 252 tests, ~4s, fully hermetic
+.venv312/bin/python -m pytest                 # 381 tests, ~5s, fully hermetic
 .venv312/bin/python -m ruff check backend/ tests/
 .venv312/bin/python -m uvicorn backend.api.main:app --reload --host 127.0.0.1 --port 8000
 ```
@@ -64,9 +64,12 @@ The index, BM25 corpus, encoder, and Gemini model discovery all resolve on
 first use and are forced deliberately in the FastAPI `lifespan` handler.
 
 `configure_logging()` must be called **before** any other `backend.*` import in
-an entry point. Modules get loggers with `logging.getLogger(__name__)` — never
-reach for `"uvicorn.error"`, which re-hides the bug `backend/logging_config.py`
-exists to fix.
+an entry point, with one deliberate exception: `backend.config` is imported
+first, because it loads `backend/.env` and `configure_logging()` reads
+`HARRISON_LOG_LEVEL` from the environment. `backend.config` imports nothing
+under `backend/` and logs nothing, so it cannot hide a diagnostic. Modules get
+loggers with `logging.getLogger(__name__)` — never reach for `"uvicorn.error"`,
+which re-hides the bug `backend/logging_config.py` exists to fix.
 
 ## Before you call a change done (RULE 5)
 
@@ -88,9 +91,13 @@ and do not let them into general context.
 
 ## Gotchas that have already cost time
 
-- **Gemini 2.5 thinks by default** and those tokens come out of
-  `max_output_tokens`. Thinking is disabled for the verifier and optimizer
-  stages; leave the draft alone.
+- **Gemini thinks by default** and those tokens come out of
+  `max_output_tokens`. Thinking is off for the verifier and optimizer stages.
+  The draft keeps it — but on 3.x only at `thinking_level=LOW`, because their
+  default reasoning pass overran the qa ceiling. 2.5-flash drafts are still
+  left alone. The knob is model-dependent (`thinking_budget` on 2.x,
+  `thinking_level` on 3.x) and one model ignores it; the probe table is in
+  `gemini_provider.py` — do not re-derive it.
 - **Groq models get decommissioned.** The optimizer silently fell back for an
   unknown period after `llama-3.1-8b-instant` was retired. Check
   `client.models.list()` before assuming a model exists.
@@ -101,13 +108,43 @@ and do not let them into general context.
 - The corpus has gaps. "Ranson" appears in 1 chunk of 16,983 and it is not the
   criteria table, so the system correctly refuses a question the prompt template
   promises to answer.
+  When the gap is partial the model does something worse than refuse: it
+  declines in its own words and pads the refusal with true but tangential cited
+  facts ("thyroid storm is not detailed in the provided chapters ... during
+  subacute thyroiditis uptake is low [p:3074]"). That lands on the `verified`
+  path, so no return-path cap fires. `answer_declines()` in
+  `confidence_scorer.py` is the floor that catches it — citation presence alone
+  does not, because the padded refusals carry citations.
+- **Cached answers store the confidence they were labelled with.** Change the
+  confidence rules and the entries already in `artifacts/semantic_cache.json`
+  keep serving the old label; bump `CACHE_SCHEMA_VERSION` in `main.py` to retire
+  them. Bumping now *deletes* them: `SemanticCache(schema_version=...)` drops
+  entries whose `metadata.schema` differs at load and rewrites the file once.
+  Before that they were loaded, scanned, and re-flushed forever — six of the
+  twenty-one entries on disk were pre-v5.
 - **Deadlines and cooldowns live in `backend/config.py`** and are imported by
   call sites. Do not reintroduce `os.getenv("LLM_..._DEADLINE_SECONDS")` at a
   call site — config and the live values silently drifted apart that way before.
+  `backend/config.py` is also the **only** place `load_dotenv()` runs, above its
+  own `os.getenv` block. It used to run in `llm.py` *after* that module had
+  already imported config, so every `.env` deadline was read before the file
+  was loaded and silently took its default. `tests/test_lazy_loading.py` fails
+  if a second `load_dotenv()` reappears anywhere under `backend/`.
 - The evidence block is built only from chunks the fused context could **not**
   carry. Building both from the same list sends every context chunk twice —
   that was 30% of the input budget.
 - Draft/verifier failover exists (`router.generate_for_stage`). Passing an
   explicit `model=` to `ask_llm()` pins one deployment and bypasses it.
+- **No model verifies its own draft.** `ask_llm()` passes the drafting
+  `result.model` to `verify_answer(drafted_by_model=...)`, which reaches
+  `generate_for_stage(exclude_model=...)`. The exclusion is per *model*, not per
+  provider — barring the provider empties the verifier order whenever Mistral is
+  dark, which loses verification entirely. It compares `_resolve_model()`, not
+  `deployment.model`: the Gemini entries carry `dynamic-*` sentinels and a raw
+  comparison silently never matches. CODING_RULES §6.1, amended 2026-08-27.
+- **An outage cools the deployment; a Gemini 429 does not.** `_cooldown()`
+  benches UNAVAILABLE/TIMEOUT for 15s so the verifier stage of the same request
+  does not re-probe a model that just 503'd. Gemini quota stays uncooled because
+  KeyManager rotates keys per project.
 - Anything in `scripts/` is documented in `scripts/README.md`. Check there
   before assuming a script is dead.

@@ -1,0 +1,292 @@
+/* HarrisonGPT — scroll-pinned helix hero.
+   Everything here is scoped to .helix-hero.  Layout tokens local to this
+   section are declared on the section itself rather than in tokens.css: they
+   are used nowhere else and the global token file stays a palette, not a
+   grab-bag. */
+
+.helix-hero{
+  --gutter:clamp(1.5rem,5vw,4.5rem);
+  --pad-y:clamp(1.25rem,3vw,2.25rem);
+  --hero-measure:30rem;
+  --shell:1560px;
+  --rail-w:5.5rem;
+  --card-bg:rgb(255 255 255 / .62);
+  --card-border:rgb(255 255 255 / .85);
+  --card-blur:22px;
+  /* .nav .wrap is 60px plus a 1px border-bottom, and it is sticky.  The pinned
+     viewport has to subtract it: pinning at top:0 underneath a sticky 61px
+     header pushes the bottom 61px of every frame — which is exactly where the
+     card sits — below the fold. */
+  --nav-h:61px;
+
+  position:relative;
+  /* landing.html sets section{padding:var(--s12) 0} for the prose sections
+     further down the page.  This section is full-bleed and pinned, and
+     inheriting that 48px pushed the sticky viewport down by the same amount,
+     slicing the card off the first paint. */
+  padding:0;
+  /* One viewport of scroll per step, plus one to settle on the last.
+     --step-count comes from len(HERO_STEPS); never hardcode a vh figure. */
+  height:calc(100svh * (var(--step-count) + 1));
+}
+
+:root[data-theme="dark"] .helix-hero{
+  --card-bg:rgb(255 255 255 / .05);
+  --card-border:rgb(255 255 255 / .11);
+}
+
+.helix-hero__viewport{
+  position:sticky;
+  top:var(--nav-h);
+  height:calc(100svh - var(--nav-h));
+  /* clip, NOT hidden: overflow:hidden makes this a scroll container and kills
+     position:sticky on it in some layouts.  clip crops identically without the
+     side effect.  100svh, NOT 100vh: vh includes the retracting mobile URL bar,
+     so the pinned viewport ends up taller than the screen and the section
+     jumps as the bar hides. */
+  overflow:clip;
+}
+
+/* Mirrors the rule in site.css that unsticks the header on a short landscape
+   phone: with nothing pinned above, there is nothing to subtract. */
+@media(max-height:500px) and (orientation:landscape){
+  .helix-hero{--nav-h:0px}
+}
+
+.helix-hero__canvas{
+  position:absolute;
+  inset:0;
+  width:100%;
+  height:100%;
+  display:block;
+}
+
+/* Static stand-in when WebGL is missing.  Drawn in CSS rather than shipped as
+   an image: it is a colour wash, and a real screenshot of the helix would be
+   a 200 kB asset for a path almost nobody takes. */
+.helix-hero__poster{
+  position:absolute;
+  inset:0;
+  background:
+    radial-gradient(60% 50% at 72% 30%,color-mix(in srgb,var(--helix-stop-4) 22%,transparent),transparent 70%),
+    radial-gradient(50% 60% at 66% 72%,color-mix(in srgb,var(--helix-stop-0) 20%,transparent),transparent 70%);
+}
+.helix-hero__poster[hidden]{display:none}
+
+.helix-hero__ui{
+  position:absolute;
+  inset:0;
+  display:grid;
+  grid-template-rows:1fr auto;
+  padding:var(--pad-y) var(--gutter);
+  max-width:var(--shell);
+  margin-inline:auto;
+  /* The UI must not eat pointer events meant for nothing — but its children
+     (links, buttons) must stay clickable. */
+  pointer-events:none;
+}
+.helix-hero__ui a,
+.helix-hero__ui button{pointer-events:auto}
+
+/* ── rail ───────────────────────────────────────────────────────────── */
+.helix-hero__rail{
+  position:absolute;
+  left:var(--gutter);
+  top:50%;
+  transform:translateY(-50%);
+  z-index:2;
+}
+.helix-hero__rail ol{list-style:none;margin:0;padding:0;display:grid;gap:var(--s1)}
+.helix-hero__rail a{
+  display:flex;align-items:center;gap:var(--s2);
+  font:500 12px/1 var(--sans);
+  color:var(--ink-300);
+  text-decoration:none;
+  padding:var(--s2) 0;         /* WCAG 2.5.8: 12px text alone is a 12px target */
+  transition:color var(--fast);
+}
+.helix-hero__rail i{
+  width:6px;height:6px;border-radius:var(--r-full);
+  border:1px solid currentColor;
+  flex:none;
+  transition:background var(--fast),transform var(--fast);
+}
+.helix-hero__rail a:hover{color:var(--ink-700)}
+.helix-hero__rail a[aria-current="step"]{color:var(--ink-900)}
+.helix-hero__rail a[aria-current="step"] i{background:var(--accent-600);
+  border-color:var(--accent-600);transform:scale(1.25)}
+
+/* ── steps ──────────────────────────────────────────────────────────── */
+.helix-hero__steps{
+  position:relative;
+  display:grid;
+  align-content:center;
+  margin-left:var(--rail-w);
+}
+.helix-step{
+  /* All steps occupy the same cell and crossfade.  They are all in the DOM
+     always — that is what makes the copy readable with JS disabled. */
+  grid-area:1 / 1;
+  max-width:var(--hero-measure);
+  opacity:0;
+  transform:translateY(14px);
+  visibility:hidden;
+  /* Only opacity and transform animate.  Anything touching layout during
+     scroll drops frames next to a WebGL loop.  The delayed visibility is what
+     keeps inactive steps out of the tab order without display:none killing
+     the fade. */
+  transition:opacity .55s var(--ease),
+             transform .55s var(--ease),
+             visibility 0s linear .55s;
+}
+.helix-step[data-active="true"]{
+  opacity:1;
+  transform:none;
+  visibility:visible;
+  transition-delay:0s,0s,0s;
+}
+.helix-step__eyebrow{
+  margin:0 0 var(--s3);
+  font:500 11px/1 var(--mono);
+  color:var(--ink-300);
+  text-transform:uppercase;
+  letter-spacing:.19em;
+}
+.helix-step__heading{
+  margin:0 0 var(--s4);
+  font:600 clamp(1.9rem,2.55vw,2.3rem)/1.14 var(--sans);
+  letter-spacing:-.025em;
+  color:var(--ink-900);
+  text-wrap:balance;
+}
+/* The opening card names the product — a wordmark, not a sentence like its
+   five siblings, so it earns a size none of them get. rail_key drives it
+   rather than :first-child: the no-js/reduced-motion CSS paths and the
+   loop.first h1 in hero.html already key off position, and stacking a second
+   position-based selector on top would make the two easy to desync. */
+.helix-step[data-rail-key="title"] .helix-step__heading{
+  font-size:clamp(2.75rem,7vw,5.25rem);
+  letter-spacing:-.03em;
+}
+.helix-step__lede{
+  margin:0 0 var(--s6);
+  font:17px/28px var(--serif);
+  color:var(--ink-700);
+}
+.helix-step__cta{margin:0}
+
+/* ── card ───────────────────────────────────────────────────────────── */
+.helix-hero__cards{position:relative;display:grid}
+.helix-card{
+  grid-area:1 / 1;
+  display:grid;
+  grid-template-columns:auto 1fr 1.35fr;
+  gap:var(--s8);
+  align-items:start;
+  padding:var(--s6) var(--s8);
+  border-radius:16px;
+  background:var(--card-bg);
+  border:1px solid var(--card-border);
+  /* The overlap effect: the card sits over the helix and blurs the particles
+     behind it instead of hiding them. */
+  backdrop-filter:blur(var(--card-blur)) saturate(150%);
+  -webkit-backdrop-filter:blur(var(--card-blur)) saturate(150%);
+  opacity:0;
+  visibility:hidden;
+  transition:opacity .55s var(--ease),visibility 0s linear .55s;
+}
+.helix-card[data-active="true"]{opacity:1;visibility:visible;transition-delay:0s,0s}
+
+/* Without this, a browser with backdrop-filter disabled renders hero text over
+   a bright particle field with nothing behind it. */
+@supports not ((backdrop-filter:blur(1px)) or (-webkit-backdrop-filter:blur(1px))){
+  .helix-card{background:color-mix(in srgb,var(--paper) 92%,transparent)}
+}
+
+.helix-card__num{
+  font:600 clamp(2rem,3.4vw,2.9rem)/1 var(--sans);
+  color:var(--ink-900);
+  letter-spacing:-.03em;
+  font-variant-numeric:tabular-nums;
+}
+.helix-card__meta{
+  margin:0 0 var(--s2);
+  font:500 11px/16px var(--mono);
+  color:var(--ink-300);
+}
+.helix-card__title{
+  margin:0;
+  font:600 17px/25px var(--sans);
+  color:var(--ink-900);
+  letter-spacing:-.01em;
+}
+.helix-card__body{
+  margin:0;
+  font:14px/22px var(--serif);
+  color:var(--ink-500);
+}
+
+/* ── narrow ─────────────────────────────────────────────────────────── */
+@media(max-width:900px){
+  .helix-hero{--rail-w:0px}
+  /* The rail is a duplicate of information the steps already carry, and at
+     this width it would sit on top of the copy. */
+  .helix-hero__rail{display:none}
+  .helix-card{
+    grid-template-columns:1fr;
+    gap:var(--s3);
+    /* Large blur radii are expensive on mobile GPUs. */
+    --card-blur:12px;
+    padding:var(--s4) var(--s6);
+  }
+  .helix-card__num{font-size:1.5rem}
+  .helix-step__lede{font-size:16px;line-height:26px}
+
+  /* On a wide screen the helix sits right of centre and the copy occupies an
+     empty left third — the composition does the legibility work.  There is no
+     left third at this width: the copy is directly over the particles, and
+     body text on a moving speckle is genuinely hard to read.  Dimming the
+     canvas is the honest fix; the alternative is a scrim that would cover
+     almost the whole viewport anyway, since the copy is at the top and the
+     card at the bottom. */
+  .helix-hero__canvas{opacity:.42}
+}
+
+/* ── reduced motion ─────────────────────────────────────────────────────
+   A hard requirement, not a nicety.  The section stops being a scroll trap:
+   no pin, no crossfade, every step in normal flow and readable. */
+@media(prefers-reduced-motion:reduce){
+  .helix-hero{height:auto}
+  .helix-hero__viewport{position:static;height:auto;overflow:visible}
+  .helix-hero__canvas{position:relative;height:44svh}
+  .helix-hero__ui{position:static;display:block;padding-block:var(--s8)}
+  .helix-hero__rail{display:none}
+  .helix-hero__steps{margin-left:0;display:block}
+  .helix-step,.helix-card{
+    grid-area:auto;
+    opacity:1;
+    visibility:visible;
+    transform:none;
+    transition:none;
+    margin-bottom:var(--s8);
+  }
+  .helix-hero__cards{display:block}
+}
+
+/* ── no JavaScript ──────────────────────────────────────────────────────
+   Without JS nothing ever sets data-active beyond step 01, so the remaining
+   steps would sit in the DOM at visibility:hidden — present in view-source but
+   not readable.  Unpin the section and stack everything instead.  This is the
+   same shape as the reduced-motion rules above and for the same reason. */
+.no-js .helix-hero{height:auto}
+.no-js .helix-hero__viewport{position:static;height:auto;overflow:visible}
+.no-js .helix-hero__canvas{display:none}
+.no-js .helix-hero__ui{position:static;display:block;padding-block:var(--s8)}
+.no-js .helix-hero__rail{display:none}
+.no-js .helix-hero__steps{margin-left:0;display:block}
+.no-js .helix-hero__cards{display:block}
+.no-js .helix-step,
+.no-js .helix-card{
+  grid-area:auto;opacity:1;visibility:visible;transform:none;transition:none;
+  margin-bottom:var(--s8);
+}

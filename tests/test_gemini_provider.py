@@ -30,12 +30,49 @@ class TestThinkingBudget(unittest.TestCase):
         self.assertIsNotNone(config)
         self.assertEqual(config.thinking_budget, 0)
 
+    def test_gemini_3_uses_thinking_level_not_budget(self):
+        """Probed live: gemini-3.6-flash returns 400 INVALID_ARGUMENT for
+        thinking_budget=0 -- and 400 is INVALID_REQUEST, which is not
+        fallback-eligible, so it would abort the verifier stage instead of
+        deferring to the next deployment."""
+        config = GeminiProvider._thinking_config(LLMStage.VERIFIER, "gemini-3.6-flash")
+        self.assertEqual(config.thinking_level, "MINIMAL")
+        self.assertIsNone(config.thinking_budget)
+
+    def test_gemini_3_7_gets_the_lowest_level_it_accepts(self):
+        """gemini-3.7-flash rejects MINIMAL and *ignores* thinking_budget=0 --
+        248 thinking tokens against a 256-token ceiling, finish_reason
+        MAX_TOKENS. LOW is the floor it honours."""
+        config = GeminiProvider._thinking_config(LLMStage.VERIFIER, "gemini-3.7-flash")
+        self.assertEqual(config.thinking_level, "LOW")
+
+    def test_gemini_2_still_uses_the_budget_knob(self):
+        """thinking_level is rejected outright on 2.x."""
+        config = GeminiProvider._thinking_config(LLMStage.VERIFIER, "gemini-2.5-flash")
+        self.assertEqual(config.thinking_budget, 0)
+        self.assertIsNone(config.thinking_level)
+
     def test_optimizer_disables_thinking(self):
         self.assertIsNotNone(GeminiProvider._thinking_config(LLMStage.OPTIMIZER))
 
-    def test_draft_keeps_thinking(self):
-        """Synthesis is where reasoning earns its token cost."""
+    def test_draft_keeps_thinking_on_2_x(self):
+        """Synthesis is where reasoning earns its token cost, and 2.5-flash
+        spends it modestly enough to be left alone."""
+        self.assertIsNone(GeminiProvider._thinking_config(LLMStage.DRAFT, "gemini-2.5-flash"))
+
+    def test_unknown_draft_model_is_left_alone(self):
+        """No model name (older call sites, tests) must behave like 2.x."""
         self.assertIsNone(GeminiProvider._thinking_config(LLMStage.DRAFT))
+
+    def test_gemini_3_draft_is_capped_but_still_reasons(self):
+        """A live qa draft on gemini-3-flash-preview returned MAX_TOKENS inside
+        the 3,000-token ceiling: the 3.x default reasoning pass ate the answer's
+        budget.  LOW still reasons (81 tokens probed); MINIMAL would be off."""
+        for model in ("gemini-3-flash-preview", "gemini-3.6-flash", "gemini-3.7-flash"):
+            with self.subTest(model=model):
+                config = GeminiProvider._thinking_config(LLMStage.DRAFT, model)
+                self.assertEqual(config.thinking_level, "LOW")
+                self.assertIsNone(config.thinking_budget)
 
     def test_older_sdk_without_thinking_config_is_tolerated(self):
         """An SDK predating the thinking budget must not break generation."""
@@ -46,7 +83,7 @@ class TestThinkingBudget(unittest.TestCase):
 
 
 class TestGenerateWiring(unittest.TestCase):
-    def _call(self, stage: LLMStage):
+    def _call(self, stage: LLMStage, model: str = "gemini-2.5-flash"):
         response = MagicMock()
         response.usage_metadata.prompt_token_count = 10
         response.usage_metadata.candidates_token_count = 5
@@ -58,20 +95,54 @@ class TestGenerateWiring(unittest.TestCase):
         provider = GeminiProvider(lambda: key_manager, lambda r: ("text", False))
 
         with patch.object(GeminiProvider, "_generate_config", side_effect=lambda **kw: kw):
-            provider.generate(_request(stage), "gemini-2.5-flash")
+            provider.generate(_request(stage), model)
         return client.models.generate_content.call_args.kwargs["config"]
 
     def test_verifier_call_carries_a_thinking_config(self):
         self.assertIn("thinking_config", self._call(LLMStage.VERIFIER))
 
-    def test_draft_call_does_not(self):
+    def test_2_x_draft_call_does_not(self):
         self.assertNotIn("thinking_config", self._call(LLMStage.DRAFT))
+
+    def test_3_x_draft_call_carries_the_cap(self):
+        """The knob has to survive the trip into generate_content(); the two
+        defects this mechanism has already had were both in the wiring, not in
+        the decision."""
+        config = self._call(LLMStage.DRAFT, "gemini-3.6-flash")
+        self.assertEqual(config["thinking_config"].thinking_level, "LOW")
+
+    def test_the_deadline_reaches_the_sdk_as_a_timeout(self):
+        """The router clamps deadline_seconds per deployment and per request
+        budget, and then nothing passed it on: for Gemini it bounded nothing.
+        A live gemini-3.7-flash draft ran 200s with no result and no error,
+        with the whole failover chain stuck behind it. google-genai takes
+        milliseconds."""
+        config = self._call(LLMStage.DRAFT)
+        self.assertEqual(config["http_options"]["timeout"], 30_000)
 
     def test_core_generation_params_are_always_passed(self):
         config = self._call(LLMStage.DRAFT)
         self.assertEqual(config["temperature"], 0.0)
         self.assertEqual(config["max_output_tokens"], 3000)
         self.assertEqual(config["system_instruction"], "system")
+
+
+class TestErrorNormalization(unittest.TestCase):
+    def test_the_sdk_timeout_spelling_is_fallback_eligible(self):
+        """Observed live once the deadline actually reached the SDK:
+        "504 DEADLINE_EXCEEDED". The spaced marker missed the underscore and
+        504 is not in the 500/502/503 rule, so it normalised to UNKNOWN --
+        which is not fallback-eligible, so the stage stopped with two healthy
+        deployments untried."""
+        from backend.llm.contracts import LLMErrorCategory
+        from backend.llm.gemini_provider import normalize_provider_error
+        from backend.llm.router import FALLBACK_ELIGIBLE
+
+        for message in ("504 DEADLINE_EXCEEDED", "deadline exceeded", "Read timed out"):
+            with self.subTest(message=message):
+                error = normalize_provider_error(Exception(message), "gemini")
+                self.assertEqual(error.category, LLMErrorCategory.TIMEOUT)
+                self.assertIn(error.category, FALLBACK_ELIGIBLE)
 
 
 class TestRegistryBudget(unittest.TestCase):

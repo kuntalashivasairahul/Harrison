@@ -1,8 +1,24 @@
 import os
+import time
 from pathlib import Path
+
+from dotenv import load_dotenv
 
 # Project root
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+# The one place backend/.env is loaded.  It used to happen in backend/llm/llm.py
+# and backend/agents/query_optimizer.py, both of which sit *below* this module in
+# the import graph -- llm.py imported backend.config on line 14 and only called
+# load_dotenv on line 23, so any entry point whose first backend import was
+# backend.llm.llm evaluated the os.getenv block below against an environment that
+# had never seen the .env file.  Every LLM_*_SECONDS setting silently fell back to
+# its default.  It went unnoticed because query_optimizer happened to load the file
+# before importing this one, and the API entry point happened to import
+# query_optimizer first.  Loading here makes the ordering a property of the import
+# graph rather than a coincidence.  override=False, so a real environment variable
+# still wins over the file.
+load_dotenv(PROJECT_ROOT / "backend" / ".env")
 
 # Artifact paths
 ARTIFACTS_DIR = PROJECT_ROOT / "artifacts"
@@ -31,3 +47,27 @@ LLM_OPTIMIZER_DEADLINE_SECONDS = float(os.getenv("LLM_OPTIMIZER_DEADLINE_SECONDS
 LLM_DRAFT_DEADLINE_SECONDS = float(os.getenv("LLM_DRAFT_DEADLINE_SECONDS", "60"))
 LLM_VERIFIER_DEADLINE_SECONDS = float(os.getenv("LLM_VERIFIER_DEADLINE_SECONDS", "60"))
 LLM_PROVIDER_COOLDOWN_SECONDS = float(os.getenv("LLM_PROVIDER_COOLDOWN_SECONDS", "60"))
+
+# Wall-clock ceiling for one /ask request.  The per-stage deadlines above are
+# independent and each stage retries, so without this a single request could
+# legitimately run for minutes.  Stage deadlines clamp against what is left of
+# this budget; retries stop when it is spent.  Set to 0 to disable.
+LLM_TOTAL_REQUEST_BUDGET_SECONDS = float(
+    os.getenv("LLM_TOTAL_REQUEST_BUDGET_SECONDS", "90")
+)
+
+# --------------------------------------------------------------------
+# Static asset cache-busting.  Appended to every /static URL a template
+# emits, so a deploy invalidates the browser cache without a filename hash
+# or a build step.
+#
+# The per-boot fallback only changes when the process restarts, so an edited
+# stylesheet keeps its cached URL and a browser reload will NOT pick it up.
+# Restart uvicorn after a CSS edit; a stale site.css cost real debugging time
+# during the UI build precisely because a reload looked like it should work.
+#
+# Pure computation at import: no I/O, no network (ARCHITECTURE §"import-time
+# purity").  It reads an env var, which is why it lives here with the other
+# os.getenv calls rather than at a call site.
+# --------------------------------------------------------------------
+ASSET_VERSION = os.getenv("HARRISON_ASSET_VERSION") or str(int(time.time()))

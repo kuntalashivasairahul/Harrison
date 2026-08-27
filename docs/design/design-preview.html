@@ -1,0 +1,315 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>HarrisonGPT — Clinical Print</title>
+<style>
+:root{
+  --paper:#FAF8F4; --surface:#FFF; --well:#F3EFE8;
+  --ink-900:#1A1714; --ink-700:#3D3630; --ink-500:#6B6259;
+  --ink-300:#786E62; --ink-100:#E5DFD6; --ink-050:#F0EBE3;
+  --accent-700:#6E1F26; --accent-600:#8B2635; --accent-100:#F6E9E9;
+  --hi-fg:#2D6A4F; --hi-bg:#E6F0EA;
+  --md-fg:#8A5A00; --md-bg:#F7EDDA;
+  --lo-fg:#55606B; --lo-bg:#EDEEF0;
+  --serif:Charter,"Bitstream Charter","Iowan Old Style","Source Serif 4",Georgia,serif;
+  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,sans-serif;
+  --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  --r-sm:3px; --r-md:6px;
+  --fast:120ms cubic-bezier(.4,0,.2,1);
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink-700);font:15px/22px var(--sans);
+  -webkit-font-smoothing:antialiased}
+.wrap{max-width:1180px;margin:0 auto;padding:48px 24px 96px}
+h1{font:600 30px/36px var(--sans);color:var(--ink-900);margin:0 0 4px;letter-spacing:-.01em}
+h2{font:600 11px/16px var(--mono);color:var(--ink-300);text-transform:uppercase;
+  letter-spacing:.08em;margin:56px 0 16px;padding-bottom:8px;border-bottom:1px solid var(--ink-100)}
+h3{font:600 18px/26px var(--sans);color:var(--ink-900);margin:0 0 8px}
+.sub{color:var(--ink-500);max-width:64ch;margin:0 0 8px}
+.note{font-size:13px;line-height:18px;color:var(--ink-300);max-width:70ch;margin:12px 0 0}
+.card{background:var(--surface);border:1px solid var(--ink-100);border-radius:var(--r-md);padding:24px}
+.grid{display:grid;gap:12px}
+.g3{grid-template-columns:repeat(auto-fit,minmax(190px,1fr))}
+.g6{grid-template-columns:repeat(auto-fit,minmax(128px,1fr))}
+
+/* swatches */
+.sw{border:1px solid var(--ink-100);border-radius:var(--r-sm);overflow:hidden;background:var(--surface)}
+.sw .chip{height:64px}
+.sw .meta{padding:8px 10px;font:11px/16px var(--mono);color:var(--ink-500)}
+.sw .meta b{display:block;color:var(--ink-900);font-weight:600}
+.sw .meta i{font-style:normal;color:var(--ink-300)}
+
+/* type scale */
+.tr{display:flex;gap:20px;align-items:baseline;padding:12px 0;border-bottom:1px solid var(--ink-100)}
+.tr:last-child{border:0}
+.tr .lbl{flex:0 0 92px;font:500 11px/16px var(--mono);color:var(--ink-300)}
+
+/* confidence */
+.conf{display:inline-flex;align-items:center;gap:7px;padding:5px 11px;border-radius:var(--r-sm);
+  font:600 13px/18px var(--sans)}
+.conf .dot{font:10px/1 var(--mono);letter-spacing:1px;border-radius:999px}
+.c-hi{color:var(--hi-fg);background:var(--hi-bg)}
+.c-md{color:var(--md-fg);background:var(--md-bg)}
+.c-lo{color:var(--lo-fg);background:var(--lo-bg)}
+
+/* refusal */
+.refusal{background:var(--ink-050);border-left:3px solid var(--ink-500);
+  border-radius:0 var(--r-sm) var(--r-sm) 0;padding:18px 22px}
+.refusal .k{font:500 11px/16px var(--mono);color:var(--ink-300);text-transform:uppercase;
+  letter-spacing:.08em;margin-bottom:8px}
+.refusal p{margin:0;font:17px/28px var(--serif);color:var(--ink-700)}
+
+/* citation chip */
+.cite{font:500 12px/1 var(--mono);color:var(--accent-600);background:transparent;
+  border:1px solid var(--accent-100);border-radius:var(--r-sm);padding:2px 5px;
+  cursor:pointer;transition:background var(--fast),border-color var(--fast);
+  vertical-align:baseline;white-space:nowrap}
+.cite:hover{background:var(--accent-100);border-color:var(--accent-600)}
+.cite:focus-visible{outline:2px solid var(--accent-600);outline-offset:2px}
+
+/* answer + rail */
+.split{display:grid;grid-template-columns:minmax(0,1fr) clamp(240px,28vw,320px);gap:24px;align-items:start}
+@media(max-width:900px){.split{grid-template-columns:1fr}
+  .rail{position:static;max-height:none;flex-direction:row;overflow-x:auto}
+  .rail .scan{flex:0 0 150px}}
+.answer{background:var(--surface);border:1px solid var(--ink-100);border-radius:var(--r-md);padding:28px 32px}
+.answer .ack{font:500 13px/18px var(--sans);color:var(--ink-300);margin:0 0 20px;
+  padding-bottom:14px;border-bottom:1px solid var(--ink-100)}
+.answer h4{font:600 21px/28px var(--sans);color:var(--ink-900);margin:26px 0 10px}
+.answer h4:first-of-type{margin-top:0}
+.answer p,.answer li{font:17px/28px var(--serif);color:var(--ink-700);max-width:68ch}
+.answer p{margin:0 0 14px}
+.answer ul{margin:0 0 14px;padding-left:22px}
+.answer li{margin-bottom:6px}
+.answer strong{color:var(--ink-900);font-weight:600}
+.qr{background:var(--well);border-radius:var(--r-sm);padding:18px 22px;margin-top:26px}
+.qr h4{margin:0 0 10px !important;font-size:18px !important}
+
+/* scan rail */
+.rail{display:flex;flex-direction:column;gap:12px;position:sticky;top:24px;
+  max-height:min(72vh,620px);overflow-y:auto;padding-right:4px;overscroll-behavior:contain}
+.rail::-webkit-scrollbar{width:6px}
+.rail::-webkit-scrollbar-thumb{background:var(--ink-100);border-radius:999px}
+.scan{border:1px solid var(--ink-100);background:var(--surface);border-radius:0;overflow:hidden;
+  cursor:pointer;transition:border-color var(--fast)}
+.scan:hover{border-color:var(--accent-600)}
+.scan .page{aspect-ratio:3/4;background:
+  repeating-linear-gradient(#F7F4EE 0 5px,#EFEAE0 5px 6px) padding-box;
+  display:flex;align-items:flex-end;padding:8px}
+.scan .cap{font:500 11px/16px var(--mono);color:var(--ink-300);padding:7px 9px;
+  border-top:1px solid var(--ink-100);display:flex;justify-content:space-between}
+.scan.active{border-color:var(--accent-600);box-shadow:inset 0 0 0 1px var(--accent-600)}
+
+/* pipeline strip */
+.strip{display:flex;flex-wrap:wrap;gap:0;font:500 11px/16px var(--mono);color:var(--ink-300);
+  border:1px solid var(--ink-100);border-radius:var(--r-sm);overflow:hidden}
+.strip span{padding:8px 12px;border-right:1px solid var(--ink-100);font-variant-numeric:tabular-nums}
+.strip span:last-child{border:0;color:var(--ink-700);background:var(--well)}
+.strip b{color:var(--ink-500);font-weight:500}
+
+/* skeleton */
+.sk{height:13px;border-radius:2px;background:var(--ink-050);animation:p 1400ms ease-in-out infinite}
+.sk+.sk{margin-top:11px}
+@keyframes p{0%,100%{opacity:1}50%{opacity:.45}}
+.stages{display:flex;gap:6px;margin-bottom:18px;flex-wrap:wrap}
+.st{font:500 11px/16px var(--mono);padding:5px 9px;border-radius:var(--r-sm);
+  background:var(--ink-050);color:var(--ink-300)}
+.st.done{background:var(--hi-bg);color:var(--hi-fg)}
+.st.now{background:var(--accent-100);color:var(--accent-600)}
+
+/* controls */
+.seg{display:inline-flex;border:1px solid var(--ink-100);border-radius:var(--r-sm);
+  overflow:hidden;background:var(--surface)}
+.seg button{border:0;background:transparent;font:500 14px/1 var(--sans);color:var(--ink-500);
+  padding:10px 18px;cursor:pointer;transition:background var(--fast),color var(--fast)}
+.seg button+button{border-left:1px solid var(--ink-100)}
+.seg button[aria-pressed=true]{background:var(--accent-600);color:#fff}
+.seg button:focus-visible{outline:2px solid var(--accent-600);outline-offset:-2px}
+.btn{border:0;background:var(--accent-600);color:#fff;font:600 14px/1 var(--sans);
+  padding:12px 20px;border-radius:var(--r-sm);cursor:pointer;transition:background var(--fast)}
+.btn:hover{background:var(--accent-700)}
+.btn:focus-visible{outline:2px solid var(--accent-600);outline-offset:2px}
+.btn.ghost{background:transparent;color:var(--accent-600);box-shadow:inset 0 0 0 1px var(--ink-100)}
+.btn.ghost:hover{background:var(--accent-100)}
+input[type=text]{width:100%;font:15px/22px var(--sans);color:var(--ink-900);background:var(--surface);
+  border:1px solid var(--ink-100);border-radius:var(--r-sm);padding:12px 14px}
+input:focus-visible{outline:2px solid var(--accent-600);outline-offset:-1px;border-color:transparent}
+
+/* radius demo */
+.rad{display:flex;gap:16px;flex-wrap:wrap}
+.rad div{width:88px;height:64px;background:var(--well);border:1px solid var(--ink-100);
+  display:flex;align-items:center;justify-content:center;font:11px/14px var(--mono);
+  color:var(--ink-300);text-align:center}
+
+/* slop table */
+table{width:100%;border-collapse:collapse;font-size:14px}
+td,th{text-align:left;padding:9px 12px;border-bottom:1px solid var(--ink-100);vertical-align:top}
+th{font:500 11px/16px var(--mono);color:var(--ink-300);text-transform:uppercase;letter-spacing:.06em}
+td.no{color:var(--ink-500);width:44%}
+td.yes{color:var(--ink-900)}
+
+@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>HarrisonGPT — Clinical&nbsp;Print</h1>
+  <p class="sub">A visual system for a medical reference that renders beside scans of printed pages.
+  Every colour pair below is contrast-verified. Self-contained: no fonts, no CDN, no JS dependencies.</p>
+
+  <h2>01 · Ground &amp; ink</h2>
+  <div class="grid g6">
+    <div class="sw"><div class="chip" style="background:#FAF8F4"></div><div class="meta"><b>paper</b>#FAF8F4</div></div>
+    <div class="sw"><div class="chip" style="background:#FFFFFF"></div><div class="meta"><b>surface</b>#FFFFFF</div></div>
+    <div class="sw"><div class="chip" style="background:#F3EFE8"></div><div class="meta"><b>well</b>#F3EFE8</div></div>
+    <div class="sw"><div class="chip" style="background:#1A1714"></div><div class="meta"><b>ink-900</b>#1A1714 <i>16.83:1</i></div></div>
+    <div class="sw"><div class="chip" style="background:#3D3630"></div><div class="meta"><b>ink-700</b>#3D3630 <i>11.19:1</i></div></div>
+    <div class="sw"><div class="chip" style="background:#6B6259"></div><div class="meta"><b>ink-500</b>#6B6259 <i>5.63:1</i></div></div>
+    <div class="sw"><div class="chip" style="background:#786E62"></div><div class="meta"><b>ink-300</b>#786E62 <i>4.71:1</i></div></div>
+    <div class="sw"><div class="chip" style="background:#E5DFD6"></div><div class="meta"><b>ink-100</b>#E5DFD6 <i>border only</i></div></div>
+    <div class="sw"><div class="chip" style="background:#8B2635"></div><div class="meta"><b>accent-600</b>#8B2635 <i>8.16:1</i></div></div>
+    <div class="sw"><div class="chip" style="background:#6E1F26"></div><div class="meta"><b>accent-700</b>#6E1F26 <i>pressed</i></div></div>
+  </div>
+  <p class="note">The ground is warm because scanned book paper is roughly #F4F1EA. On pure white
+  every page scan reads as grey and dirty. <b>ink-300</b> started life at #A69C91 and measured
+  2.54:1 — it would have failed AA on the page labels that carry provenance. Darkened until it passed.</p>
+
+  <h2>02 · Type scale</h2>
+  <div class="card">
+    <div class="tr"><span class="lbl">display 30</span><span style="font:600 30px/36px var(--sans);color:var(--ink-900)">HarrisonGPT</span></div>
+    <div class="tr"><span class="lbl">h1 21 sans</span><span style="font:600 21px/28px var(--sans);color:var(--ink-900)">Diabetic Ketoacidosis</span></div>
+    <div class="tr"><span class="lbl">body 17 serif</span><span style="font:17px/28px var(--serif)">Initial fluid replacement is isotonic saline at 1–1.5&nbsp;L/h.</span></div>
+    <div class="tr"><span class="lbl">ui 15 sans</span><span style="font:15px/22px var(--sans)">Smart Summary · Q&amp;A</span></div>
+    <div class="tr"><span class="lbl">micro 11 mono</span><span style="font:500 11px/16px var(--mono);color:var(--ink-300)">p.3254 · draft 6.14s</span></div>
+  </div>
+  <p class="note">Answer prose is <b>serif at 17px/28px, capped at 68ch</b> — it is textbook prose set
+  beside a scanned textbook page, and it is read rather than skimmed. Chrome is sans. Page labels and
+  timings are mono with tabular figures so numbers don't jitter as they update.</p>
+
+  <h2>03 · Confidence &amp; refusal — the load-bearing states</h2>
+  <div class="card">
+    <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:22px">
+      <span class="conf c-hi"><span class="dot">●●●</span>High confidence</span>
+      <span class="conf c-md"><span class="dot">●●○</span>Medium confidence</span>
+      <span class="conf c-lo"><span class="dot">●○○</span>Low confidence</span>
+    </div>
+    <div class="refusal">
+      <div class="k">Refusal — rendered verbatim</div>
+      <p>Insufficient information in the provided context.</p>
+    </div>
+  </div>
+  <p class="note"><b>Low is slate, not red.</b> Red would collide with the oxblood accent and
+  over-signals — low confidence is uncertainty, not an error. <b>Never colour alone:</b> every state
+  carries a glyph and the literal word, because a colourblind resident reading a dosage must not be
+  one hue away from misreading the system's own hedge. <b>Refusal is its own state</b> — no warning
+  triangle, no emoji, no "try rephrasing", no softening of any kind.</p>
+
+  <h2>04 · Answer + page rail — the signature interaction</h2>
+  <div class="split">
+    <div class="answer">
+      <p class="ack">Topic received — generating Harrison Smart Summary.</p>
+      <h4>Fluid Resuscitation</h4>
+      <p>Begin with <strong>isotonic saline</strong> at 1–1.5&nbsp;L over the first hour, then reassess
+      corrected sodium and haemodynamic status before selecting the subsequent rate.
+      <button class="cite">p.3254</button> Total deficit typically approaches 3–6&nbsp;L.
+      <button class="cite">p.3255</button></p>
+      <h4>Insulin &amp; Potassium</h4>
+      <ul>
+        <li>Withhold insulin until serum <strong>K⁺ &gt; 3.3&nbsp;mEq/L</strong> <button class="cite">p.3254</button></li>
+        <li>Add dextrose once glucose falls below 200&nbsp;mg/dL <button class="cite">p.0411</button></li>
+      </ul>
+      <div class="qr">
+        <h4>Quick Revision</h4>
+        <ul style="margin-bottom:0">
+          <li>Fluids before insulin, always.</li>
+          <li>Bicarbonate corrects; glucose does not <button class="cite">p.3254</button></li>
+        </ul>
+      </div>
+    </div>
+    <div class="rail">
+      <div class="scan active"><div class="page"></div><div class="cap"><span>p.3254</span><span>↗</span></div></div>
+      <div class="scan"><div class="page"></div><div class="cap"><span>p.3255</span><span>↗</span></div></div>
+      <div class="scan"><div class="page"></div><div class="cap"><span>p.0411</span><span>↗</span></div></div>
+    </div>
+  </div>
+  <p class="note">Every <code style="font:12px var(--mono)">[p:NNN]</code> becomes a focusable chip;
+  activating it highlights that page in the rail, and the rail opens the full PNG in a lightbox.
+  Scans are <b>square-cornered</b> — a book page is a rectangle, and rounding it is a small lie about
+  the artefact. Below 900px the rail collapses and citations open a sheet instead.</p>
+
+  <h2>05 · Pipeline strip &amp; the 40-second wait</h2>
+  <div class="grid" style="grid-template-columns:1fr;gap:20px">
+    <div class="strip">
+      <span><b>retrieval</b> 0.41s</span><span><b>rerank</b> 0.22s</span>
+      <span><b>draft</b> 6.14s</span><span><b>verify</b> 3.30s</span><span><b>total</b> 10.31s</span>
+    </div>
+    <div class="card">
+      <div class="stages">
+        <span class="st done">optimizer 0.7s</span><span class="st done">retrieval 0.4s</span>
+        <span class="st done">rerank 0.2s</span><span class="st now">drafting…</span><span class="st">verify</span>
+      </div>
+      <div class="sk" style="width:96%"></div><div class="sk" style="width:88%"></div>
+      <div class="sk" style="width:72%"></div><div class="sk" style="width:40%"></div>
+    </div>
+  </div>
+  <p class="note"><code style="font:12px var(--mono)">/ask</code> blocks for 10–40s with no token
+  stream, so a spinner reads as a hang. The skeleton is labelled with the pipeline's real stage names.
+  <b>Known ceiling:</b> <code style="font:12px var(--mono)">timings</code> only arrives <i>with</i> the
+  answer, so mid-flight progress is an estimate — on a slow request it sits at "drafting" longer than
+  it claims. The honest fix is an SSE endpoint; that is a backend change and shouldn't gate the UI.
+  This is the only looping animation in the system.</p>
+
+  <h2>06 · Controls</h2>
+  <div class="card grid" style="gap:18px;max-width:640px">
+    <input type="text" placeholder="Ask about a condition, drug, or presentation…">
+    <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:center">
+      <div class="seg">
+        <button aria-pressed="true">Smart Summary</button><button aria-pressed="false">Q&amp;A</button>
+      </div>
+      <button class="btn">Ask</button>
+      <button class="btn ghost">Clear</button>
+    </div>
+  </div>
+  <p class="note">The mode toggle is one request field (<code style="font:12px var(--mono)">mode</code>),
+  but it produces visibly different artefacts — structured synthesis with a Quick Revision block, versus
+  dense prose. Worth a segmented control, not a dropdown. Focus rings are 2px accent at 2px offset,
+  never removed.</p>
+
+  <h2>07 · Radius &amp; elevation</h2>
+  <div class="card">
+    <div class="rad">
+      <div style="border-radius:0">0<br>scans</div>
+      <div style="border-radius:3px">3px<br>chips</div>
+      <div style="border-radius:6px">6px<br>cards</div>
+      <div style="border-radius:999px;width:64px">dot<br>only</div>
+      <div style="border-radius:6px;border-color:transparent;box-shadow:0 8px 40px rgba(26,23,20,.28);background:var(--surface)">the one<br>shadow</div>
+    </div>
+  </div>
+  <p class="note"><b>Exactly one shadow exists in this system</b> — the lightbox overlay. Everything
+  else is a 1px ink-100 border. Paper does not float. This single rule prevents most of the drift that
+  makes an interface look generic.</p>
+
+  <h2>08 · Anti-slop contract</h2>
+  <div class="card">
+    <table>
+      <tr><th>Rejected default</th><th>What this system does</th></tr>
+      <tr><td class="no">Purple→blue gradient, gradient text</td><td class="yes">One oxblood accent, flat fills</td></tr>
+      <tr><td class="no">Glassmorphism, blur, shadow on every card</td><td class="yes">1px borders; one shadow, total</td></tr>
+      <tr><td class="no">Rounded corners on everything</td><td class="yes">Radius carries meaning; scans are square</td></tr>
+      <tr><td class="no">Centred hero over a stock gradient</td><td class="yes">Search field and the document</td></tr>
+      <tr><td class="no">Scroll-reveal animation</td><td class="yes">Motion only on hover, focus, and the wait</td></tr>
+      <tr><td class="no">Chat-bubble transcript UI</td><td class="yes">The answer is a document, not a message</td></tr>
+      <tr><td class="no">14px sans body with no rationale</td><td class="yes">17px serif at 68ch, beside a serif scan</td></tr>
+    </table>
+  </div>
+  <p class="note">A medical reference that looks like a landing page for a Series A undermines its own
+  credibility before a word is read. Dark mode is <b>deliberately absent in v1</b>: every scan is white
+  paper and would glow in a dark shell. All values route through tokens, so it is later one
+  <code style="font:12px var(--mono)">[data-theme]</code> block — not a refactor.</p>
+
+</div>
+</body>
+</html>

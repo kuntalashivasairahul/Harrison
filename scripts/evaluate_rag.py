@@ -154,7 +154,7 @@ def _with_retry(fn, *args, label: str = "call", on_rate_limit=None, **kwargs):
             if retry_after is not None:
                 wait = retry_after + 2.0  # small safety margin
                 print(
-                    f"\n  {YELLOW}⏳ Rate limit hit on {label} "
+                    f"\n  {YELLOW}Rate limit hit on {label} "
                     f"(attempt {attempt}/{RETRY_MAX_ATTEMPTS}). "
                     f"Gemini says wait {retry_after:.0f}s — sleeping {wait:.0f}s…{RESET}",
                     flush=True,
@@ -164,7 +164,7 @@ def _with_retry(fn, *args, label: str = "call", on_rate_limit=None, **kwargs):
                 jitter = random.uniform(-0.1 * delay, 0.1 * delay)
                 wait   = min(delay + jitter, RETRY_MAX_DELAY_S)
                 print(
-                    f"\n  {YELLOW}⏳ Rate limit hit on {label} "
+                    f"\n  {YELLOW}Rate limit hit on {label} "
                     f"(attempt {attempt}/{RETRY_MAX_ATTEMPTS}). "
                     f"Back-off {wait:.1f}s…{RESET}",
                     flush=True,
@@ -430,7 +430,7 @@ def run_evaluation() -> list[EvalResult]:
         print(f"  ✓ Cache cleared  "
               f"({cleared.get('entries_cleared', '?')} entries removed)\n")
     except Exception as exc:
-        print(f"  {YELLOW}⚠ Could not clear cache: {exc} — continuing anyway{RESET}\n")
+        print(f"  {YELLOW}Could not clear cache: {exc} — continuing anyway{RESET}\n")
 
     results: list[EvalResult] = []
 
@@ -465,13 +465,13 @@ def run_evaluation() -> list[EvalResult]:
         except Exception as exc:
             error = str(exc)
             print(f"\r  {RED}✗ Pipeline error: {error}{RESET}")
-            print(f"  {YELLOW}⚠ Skipping judge for this query — continuing to next.{RESET}")
+            print(f"  {YELLOW}Skipping judge for this query — continuing to next.{RESET}")
 
         # ── Inter-query sleep — prevent rate-limit pileup on Gemini ────
         # Sleep before the judge call so both the /ask and judge tokens
         # are separated from the next query's /ask call.
         if idx < len(GOLDEN_DATASET):
-            print(f"  {DIM}⏱ Sleeping {INTER_QUERY_SLEEP_S}s to respect Gemini API limits…{RESET}")
+            print(f"  {DIM}Sleeping {INTER_QUERY_SLEEP_S}s to respect Gemini API limits…{RESET}")
             time.sleep(INTER_QUERY_SLEEP_S)
 
         # ── Step 2: Judge ──────────────────────────────────────────────
@@ -550,7 +550,7 @@ def print_summary(results: list[EvalResult]) -> bool:
     print(f"  {BOLD}Pass threshold : {PASS_THRESHOLD}/5.0{RESET}")
     print(
         f"\n  Suite result   : "
-        f"{GREEN + BOLD + '✅  PASSED' if passed else RED + BOLD + '❌  FAILED'}"
+        f"{GREEN + BOLD + 'PASSED' if passed else RED + BOLD + 'FAILED'}"
         f"{RESET}\n"
     )
     _hr("═")

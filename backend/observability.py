@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 import uuid
 from contextvars import ContextVar
 from typing import Any
@@ -31,6 +32,26 @@ request_id_var: ContextVar[str] = ContextVar("request_id", default="-")
 
 def new_request_id() -> str:
     return uuid.uuid4().hex[:12]
+
+
+#: Absolute monotonic deadline for the whole request, set by /ask.
+#: Stage deadlines are 60s each and every one of them retries, so nothing
+#: bounded a single request end to end -- the deadline structure alone
+#: permitted several minutes.  This is the ceiling all of them clamp against.
+request_deadline_var: ContextVar[float | None] = ContextVar(
+    "request_deadline", default=None
+)
+
+
+def start_request_budget(seconds: float) -> None:
+    """Open a wall-clock budget for the current request. 0 or less disables it."""
+    request_deadline_var.set(time.monotonic() + seconds if seconds > 0 else None)
+
+
+def remaining_budget() -> float | None:
+    """Seconds left in the request budget, or None when no budget is set."""
+    deadline = request_deadline_var.get()
+    return None if deadline is None else deadline - time.monotonic()
 
 
 class RequestIdFilter(logging.Filter):

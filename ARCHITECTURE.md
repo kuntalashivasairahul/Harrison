@@ -29,8 +29,8 @@ The request lifecycle for `/ask` is:
    registered for the stage in priority order — `gemini-primary`, then
    `gemini-draft-fallback` on a different Gemini model. A provider-side outage
    on one model no longer fails the request. `KeyManager` uses `GEMINI_API_KEY` plus `GEMINI_API_KEY_1` through `_10` as distinct round-robin projects and temporarily cools down individual projects after quota responses.
-7. Unless `disable_verifier` is requested, `verify_answer()` performs a grounded Gemini rewrite at temperature `0.0`. A complete verified response is the only response eligible for semantic-cache persistence.
-8. `backend/agents/confidence_scorer.py` scores the final response from average cross-encoder relevance and draft-to-verified length divergence; return-path and truncation caps are then applied by the API.
+7. Unless `disable_verifier` is requested, `verify_answer()` performs a grounded rewrite at temperature `0.0`, routed through `LLMRouter.generate_for_stage(VERIFIER, exclude_model=...)` so the model that wrote the draft never grades it. A complete verified response is the only response eligible for semantic-cache persistence.
+8. `backend/agents/confidence_scorer.py` scores the final response from average cross-encoder relevance and draft-to-verified length divergence; return-path and truncation caps are then applied by the API, followed by a groundedness floor — an answer with no `[p:NNN]` citation, or one that opens by saying the provided context does not cover the question (`answer_declines()`), is forced to `Low` whatever path produced it.
 9. Source labels are resolved into page-image URLs and returned with timing data in `QueryResponse`.
 
 ---
@@ -272,7 +272,11 @@ draft_answer  ──→  verify_answer(draft, context, mode, model)  ──→  
 - Instruction: keep supported claims, rewrite partial claims, remove
   unsupported claims. **Never invent** new page numbers.
 - Bypassed when the request sets `disable_verifier=true`; otherwise the
-  verifier retries quota failures using the Gemini key pool.
+  verifier retries quota failures using the Gemini key pool, then fails over to
+  the next verifier deployment in priority order. The model that produced the
+  draft is excluded from that order for the request it drafted -- per model, not
+  per provider, because excluding the provider empties the order whenever
+  Mistral is dark. See `CODING_RULES §6.1`, amended 2026-08-27.
 - A complete verified answer is cacheable. Draft fallbacks, disabled
   verification, and truncated responses are not persisted in the semantic cache.
 

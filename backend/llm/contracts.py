@@ -37,6 +37,16 @@ class LLMRequest:
     stage: LLMStage
 
 
+#: Every provider spelling of "output was cut at the token ceiling".  Gemini
+#: says MAX_TOKENS; Mistral and Groq both speak OpenAI's dialect and say
+#: "length", and Mistral adds "model_length" for its context limit.  Nothing
+#: recognised either, so a truncated Mistral or Groq answer reached the user
+#: with no truncation notice and no confidence cap, and was cached and
+#: re-served as High confidence.  Compare through LLMResult.truncated, never
+#: against a literal.
+TRUNCATED_FINISH_REASONS = frozenset({"MAX_TOKENS", "LENGTH", "MODEL_LENGTH"})
+
+
 @dataclass
 class LLMResult:
     text: str
@@ -49,6 +59,11 @@ class LLMResult:
     latency_seconds: float = 0.0
     raw_response: Any = field(default=None, repr=False)
 
+    @property
+    def truncated(self) -> bool:
+        """True when generation stopped at the token ceiling, not a stop token."""
+        return (self.finish_reason or "").upper() in TRUNCATED_FINISH_REASONS
+
 
 class LLMError(RuntimeError):
     """Normalized provider failure used for routing policy decisions."""
@@ -60,8 +75,15 @@ class LLMError(RuntimeError):
         *,
         retry_after_seconds: float | None = None,
         provider: str | None = None,
+        model: str | None = None,
     ) -> None:
         super().__init__(message)
         self.category = category
         self.retry_after_seconds = retry_after_seconds
         self.provider = provider
+        #: The model that produced this failure. Gemini quota cooldowns are
+        #: scoped per (key, model), and KeyManager otherwise has to infer the
+        #: model from the last next_client() call — which is process-global, so
+        #: a concurrent request on another model can win the race and get the
+        #: cooldown recorded against it instead.
+        self.model = model

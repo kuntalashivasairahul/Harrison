@@ -132,7 +132,7 @@ def convert(pdf_path: Path, out_path: Path, quiet: bool = False) -> None:
     out_mb  = out_path.stat().st_size / 1e6
 
     log.info("=" * 60)
-    log.info("✅  Conversion complete.")
+    log.info("Conversion complete.")
     log.info("   Pages processed : %d", total_pages)
     log.info("   Output size     : %.1f MB", out_mb)
     log.info("   Elapsed         : %.1f s  (%.0f pages/s)", elapsed, total_pages / elapsed)

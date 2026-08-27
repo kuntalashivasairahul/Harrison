@@ -152,7 +152,7 @@ def load_chunks() -> List[Dict]:
     # Audit page=0 immediately
     zero = sum(1 for c in chunks if c.get("page", 0) == 0)
     if zero:
-        print(_warn(f"  ⚠ {zero:,} chunks still have page=0 "
+        print(_warn(f"  WARNING: {zero:,} chunks still have page=0 "
                     f"({zero / len(chunks) * 100:.1f}% of corpus)"))
     else:
         print(_ok("  ✓ Zero page=0 chunks — page tracking is healthy"))

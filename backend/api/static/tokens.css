@@ -1,0 +1,105 @@
+/* HarrisonGPT — Clinical Print design tokens.
+   Generated from docs/design/design-tokens.json.  Pure custom properties: no
+   selectors beyond :root, so this file transfers unchanged to any frontend. */
+:root{
+  /* ground — warm, because scanned book paper is ~#F4F1EA and reads as dingy
+     grey against pure white */
+  --paper:#FAF8F4;
+  --surface:#FFFFFF;
+  --well:#F3EFE8;
+
+  /* ink — warm-neutral; pure black is harder-edged than the scan's own ink */
+  --ink-900:#1A1714;   /* 16.83:1 on paper */
+  --ink-700:#3D3630;   /* 11.19:1 */
+  --ink-500:#6B6259;   /*  5.63:1 */
+  --ink-300:#786E62;   /*  4.71:1 */
+  --ink-100:#E5DFD6;   /*  borders only, never text */
+  --ink-050:#F0EBE3;
+
+  /* accent — Harrison oxblood */
+  --accent-700:#6E1F26;
+  --accent-600:#8B2635; /* 8.16:1 on paper */
+  --accent-100:#F6E9E9;
+
+  /* confidence — deliberately outside the accent family, and never signalled
+     by colour alone: every state also carries a glyph and the literal word */
+  --hi-fg:#2D6A4F; --hi-bg:#E6F0EA;
+  --md-fg:#8A5A00; --md-bg:#F7EDDA;
+  --lo-fg:#55606B; --lo-bg:#EDEEF0;
+
+  --serif:Charter,"Bitstream Charter","Iowan Old Style","Source Serif 4",Georgia,serif;
+  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,sans-serif;
+  --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+
+  --s1:4px; --s2:8px; --s3:12px; --s4:16px;
+  --s6:24px; --s8:32px; --s12:48px; --s16:64px;
+
+  /* radius carries meaning: a book page is a rectangle */
+  --r-none:0; --r-sm:3px; --r-md:6px; --r-full:999px;
+
+  /* paper does not float — exactly one shadow exists in this system */
+  --shadow-lightbox:0 8px 40px rgba(26,23,20,.28);
+
+  --fast:120ms cubic-bezier(.4,0,.2,1);
+  --modal:180ms cubic-bezier(.4,0,.2,1);
+
+  --measure:68ch;
+
+  /* ── helix hero ────────────────────────────────────────────────────
+     These three are read by JavaScript via getComputedStyle (helix/controller.js).
+     They are tokens, not decoration: additive blending cannot darken, so on a
+     light ground every particle can only add toward white and the column
+     washes out to a pale smear.  The blend mode has to switch with the theme,
+     and the halo has to drop ~3x at the same time or the mist turns to fog.
+     Keeping them here means the helix is retunable without opening a shader. */
+  --helix-blend:normal;
+  --helix-core-alpha:0.85;
+  --helix-halo-alpha:0.030;
+
+  /* Gradient stops, bottom (t=0) to top (t=1).  Read by JS, parsed as hex.
+     The reference ramp is cyan-to-magenta; ours walks the Harrison oxblood
+     out through plum to a cool base so the hero belongs to the same system as
+     the rest of the page instead of reading as a borrowed component. */
+  --helix-stop-0:#3F4A63;
+  --helix-stop-1:#5B4463;
+  --helix-stop-2:#7A3A55;
+  --helix-stop-3:#9B2F40;
+  --helix-stop-4:#C2453F;
+
+  --ease:cubic-bezier(.22,.61,.36,1);
+
+  /* Button label colour is a token, not a literal, because it does not survive
+     a theme flip: accent-600 is a dark red on paper and a pale pink on black,
+     so a hardcoded #fff measures 8.65:1 in one theme and 2.42:1 in the other. */
+  --btn-ink:#FFFFFF;
+}
+
+/* Dark is defined but not yet reachable from the UI — there is no toggle.  It
+   exists because the blend-switching path in helix/controller.js is the single most
+   fragile part of this build, and a code path with no way to exercise it rots.
+   Set data-theme="dark" on <html> in devtools to check it. */
+:root[data-theme="dark"]{
+  --paper:#08080A;
+  --surface:#121216;
+  --well:#1A1A1F;
+  --ink-900:#FAFAFA;
+  --ink-700:#D7D5D2;
+  --ink-500:#A39D96;
+  --ink-300:#8B857E;
+  --ink-100:#2A2A30;
+  --ink-050:#1C1C21;
+  --accent-600:#E0919B;
+  --accent-700:#F0B6BE;
+  --accent-100:#3A1F26;
+  --btn-ink:#08080A;    /* see the note on --btn-ink above */
+
+  --helix-blend:additive;
+  --helix-core-alpha:1.0;
+  --helix-halo-alpha:0.090;
+
+  --helix-stop-0:#1FD3FF;
+  --helix-stop-1:#3F7BF5;
+  --helix-stop-2:#7B45EF;
+  --helix-stop-3:#B534F4;
+  --helix-stop-4:#FF5CE8;
+}

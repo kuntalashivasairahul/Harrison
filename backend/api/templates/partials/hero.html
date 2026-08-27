@@ -1,0 +1,78 @@
+{# Scroll-pinned helix hero.
+
+   Structure is load-bearing: one scroll-height wrapper (.helix-hero), one
+   sticky viewport inside it, the canvas behind, the UI grid in front.
+
+   Every step is in the DOM at all times and crossfaded with opacity — never
+   display:none, never injected by JS.  That is what keeps the copy crawlable,
+   selectable, and fully readable with JavaScript disabled.
+
+   --step-count drives the section height in CSS.  It comes from
+   len(HERO_STEPS); no viewport count is hardcoded anywhere. #}
+<section class="helix-hero" id="hero" style="--step-count:{{ hero_steps|length }}">
+  <div class="helix-hero__viewport">
+
+    {# aria-hidden: the canvas is decorative.  It carries nothing that is not
+       also in the text beside it. #}
+    <canvas class="helix-hero__canvas" id="helix-canvas" aria-hidden="true"></canvas>
+
+    {# Shown instead of the canvas when WebGL is unavailable (spec §10). #}
+    <div class="helix-hero__poster" aria-hidden="true" hidden></div>
+
+    <div class="helix-hero__ui">
+
+      <nav class="helix-hero__rail" aria-label="Hero sections">
+        <ol>
+          {% for key, label in rail %}
+          <li>
+            <a href="#step-{{ loop.index0 }}" data-rail="{{ key }}"
+               {% if loop.first %}aria-current="step"{% endif %}>
+              <i aria-hidden="true"></i>{{ label }}
+            </a>
+          </li>
+          {% endfor %}
+        </ol>
+      </nav>
+
+      <div class="helix-hero__steps">
+        {% for s in hero_steps %}
+        {# Only step 01 is an <h1>.  Rendering five <h1>s breaks the document
+           outline, so 02..n use <p> styled identically. #}
+        <article class="helix-step" id="step-{{ loop.index0 }}"
+                 data-step="{{ loop.index0 }}"
+                 data-rail-key="{{ s.rail_key }}"
+                 {% if loop.first %}data-active="true"{% endif %}>
+          <p class="helix-step__eyebrow">{{ s.eyebrow }}</p>
+          {% if loop.first %}
+          <h1 class="helix-step__heading">{{ s.heading }}</h1>
+          {% else %}
+          <p class="helix-step__heading">{{ s.heading }}</p>
+          {% endif %}
+          <p class="helix-step__lede">{{ s.lede }}</p>
+          {% if s.cta_label %}
+          <a class="btn helix-step__cta" href="{{ s.cta_href }}">{{ s.cta_label }}</a>
+          {% endif %}
+        </article>
+        {% endfor %}
+      </div>
+
+      <div class="helix-hero__cards">
+        {% for s in hero_steps %}
+        {# No aria-hidden in the markup.  helix/steps.js owns it and adds it only
+           when it is actually running the crossfade — under reduced motion, and
+           with JS off, every step is visible and must stay in the a11y tree. #}
+        <div class="helix-card" data-step="{{ loop.index0 }}"
+             {% if loop.first %}data-active="true"{% endif %}>
+          <span class="helix-card__num">{{ s.index }}</span>
+          <div>
+            <p class="helix-card__meta">{{ s.card_meta }}</p>
+            <p class="helix-card__title">{{ s.card_title }}</p>
+          </div>
+          <p class="helix-card__body">{{ s.card_body }}</p>
+        </div>
+        {% endfor %}
+      </div>
+
+    </div>
+  </div>
+</section>
