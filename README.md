@@ -1,11 +1,10 @@
 # HarrisonGPT
 
-> **Built with AI assistance, reviewed by a human.** 20 of the 54 commits here
-> carry a `Co-Authored-By: Claude` trailer; every change was read and accepted
-> by a person before it landed, and the design decisions are human calls written
-> down in `CODING_RULES.md`. Details, including a case where that review caught
-> something, are in [Provenance](#provenance-built-with-ai-reviewed-by-a-human).
-> This is a study aid, **not a diagnostic device**.
+> **Built with AI assistance, reviewed by a human.** Every change was read and
+> accepted by a person before it landed, and the design decisions are human
+> calls. Details, including a case where that review caught something, are in
+> [Provenance](#provenance-built-with-ai-reviewed-by-a-human). This is a study
+> aid, **not a diagnostic device**.
 
 HarrisonGPT is a production-grade, high-recall **Medical Retrieval-Augmented Generation (RAG) System** grounded exclusively in *Harrison's Principles of Internal Medicine* (20th+ Edition). Designed for clinicians, medical students, and exam preparation, the system prioritizes factual fidelity and citation grounding over raw creativity.
 
