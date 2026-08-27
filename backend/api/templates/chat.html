@@ -17,7 +17,7 @@
   color:var(--ink-500);padding:0 var(--s4);min-height:44px;cursor:pointer;
   transition:background var(--fast),color var(--fast)}
 .seg button+button{border-left:1px solid var(--ink-100)}
-.seg button[aria-pressed=true]{background:var(--accent-600);color:#fff}
+.seg button[aria-pressed=true]{background:var(--accent-600);color:var(--btn-ink)}
 .seg button:focus-visible{outline:2px solid var(--accent-600);outline-offset:-2px}
 .hint{font-size:13px;color:var(--ink-300);margin:var(--s3) 0 0}
 .hint button{background:none;border:0;color:var(--accent-600);cursor:pointer;
@@ -178,7 +178,7 @@
     <form id="ask-form">
       <div class="field">
         <label for="q" class="skip">Your question</label>
-        <input id="q" name="q" type="text" autocomplete="off" autofocus
+        <input id="q" name="q" type="text" autocomplete="off" autofocus required
                maxlength="{{ max_query_chars }}"
                placeholder="Ask about a condition, drug, or presentation…">
       </div>

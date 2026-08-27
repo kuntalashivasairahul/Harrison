@@ -159,6 +159,15 @@
   color:var(--ink-900);
   text-wrap:balance;
 }
+/* The opening card names the product — a wordmark, not a sentence like its
+   five siblings, so it earns a size none of them get. rail_key drives it
+   rather than :first-child: the no-js/reduced-motion CSS paths and the
+   loop.first h1 in hero.html already key off position, and stacking a second
+   position-based selector on top would make the two easy to desync. */
+.helix-step[data-rail-key="title"] .helix-step__heading{
+  font-size:clamp(2.75rem,7vw,5.25rem);
+  letter-spacing:-.03em;
+}
 .helix-step__lede{
   margin:0 0 var(--s6);
   font:17px/28px var(--serif);

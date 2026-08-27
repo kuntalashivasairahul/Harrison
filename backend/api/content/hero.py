@@ -33,6 +33,7 @@ class HeroStep:
 # The rail down the left edge.  Order defines display order; the keys are
 # matched against HeroStep.rail_key to move aria-current as you scroll.
 RAIL: tuple[tuple[str, str], ...] = (
+    ("title", "Start"),
     ("intro", "Intro"),
     ("retrieve", "Retrieve"),
     ("rerank", "Rerank"),
@@ -47,6 +48,23 @@ RAIL: tuple[tuple[str, str], ...] = (
 HERO_STEPS: tuple[HeroStep, ...] = (
     HeroStep(
         index="01",
+        eyebrow="Reference assistant",
+        heading="HarrisonGPT",
+        lede="A grounded reference assistant over Harrison's Principles of "
+             "Internal Medicine. Ask a clinical question and get an answer "
+             "built from the retrieved text — every claim linked back to the "
+             "scanned page it came from.",
+        rail_key="title",
+        card_meta="Harrison's Principles of Internal Medicine",
+        card_title="Built to be checked, not trusted blindly",
+        card_body="Five stages sit between your question and the answer — "
+                  "retrieval, reranking, drafting, verification. Scroll to "
+                  "see how each one works.",
+        cta_label="Try it now",
+        cta_href="/chat",
+    ),
+    HeroStep(
+        index="02",
         eyebrow="What this is",
         heading="Every answer points back to the page it came from.",
         lede="A reference assistant that reads Harrison's Principles of Internal "
@@ -62,7 +80,7 @@ HERO_STEPS: tuple[HeroStep, ...] = (
         cta_href="/chat",
     ),
     HeroStep(
-        index="02",
+        index="03",
         eyebrow="Stage one",
         heading="Retrieval happens before generation.",
         lede="Your question is expanded — acronyms resolved, clinical framing "
@@ -76,7 +94,7 @@ HERO_STEPS: tuple[HeroStep, ...] = (
                   "so neither method's blind spot decides the answer.",
     ),
     HeroStep(
-        index="03",
+        index="04",
         eyebrow="Stage two",
         heading="Weak matches are dropped, not ranked lower.",
         lede="A cross-encoder reads your question and each candidate passage "
@@ -90,7 +108,7 @@ HERO_STEPS: tuple[HeroStep, ...] = (
                   "answer from, so the system says so instead of guessing.",
     ),
     HeroStep(
-        index="04",
+        index="05",
         eyebrow="Stage three",
         heading="The draft can only use what survived.",
         lede="The answer is written from the passages that cleared the filter "
@@ -104,7 +122,7 @@ HERO_STEPS: tuple[HeroStep, ...] = (
                   "it is checked in the next stage.",
     ),
     HeroStep(
-        index="05",
+        index="06",
         eyebrow="Stage four",
         heading="A second pass checks it before you see it.",
         lede="An independent verification pass re-reads the draft against the "

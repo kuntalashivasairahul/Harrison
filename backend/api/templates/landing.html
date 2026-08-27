@@ -38,8 +38,16 @@ h2{font:600 26px/34px var(--sans);color:var(--ink-900);letter-spacing:-.01em;
   white-space:nowrap}
 .demo .scan{border:1px solid var(--ink-100);background:var(--surface);
   border-radius:var(--r-none)}
-.demo .scan .pg{aspect-ratio:3/4;background:repeating-linear-gradient(
-  #F7F4EE 0 5px,#EFEAE0 5px 6px)}
+/* CSS-only facsimile, not a real page scan: the real scans are licensed
+   textbook pages served on /chat, not shipped to the public landing page.
+   The faint ruled lines read as "stylized page" rather than a blank/broken
+   image slot. */
+.demo .scan .pg{aspect-ratio:3/4;background:
+  repeating-linear-gradient(
+    color-mix(in srgb,var(--ink-300) 34%,transparent) 0 2px,
+    transparent 2px 20px
+  ) 10% 8%/80% 84% no-repeat,
+  var(--ink-050)}
 .demo .scan .cap{font:500 11px/16px var(--mono);color:var(--ink-300);
   padding:7px 9px;border-top:1px solid var(--ink-100)}
 
