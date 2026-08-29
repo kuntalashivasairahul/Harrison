@@ -3,6 +3,105 @@
 
 {% block head %}
 <style>
+/* ── ambient bubble field ─────────────────────────────────────────
+   Decorative only: aria-hidden, pointer-events:none, and z-index:-1, which
+   puts it above the body background and under everything opaque — the same
+   trick `.motion body::after` uses for the lamp in site.css.  The .answer
+   card is --surface white, so nothing here ever sits behind running text.
+
+   Nine bubbles in a near/mid/far stack.  Every value describing one bubble is
+   a custom property on its own wrapper, so the field is retunable from the
+   markup without opening this block.
+
+   Parallax costs no JavaScript.  motion.js already publishes the pointer as
+   --px/--py on <html> from one rAF-throttled listener, and only after adding
+   .motion — which it refuses to do on a coarse pointer or under
+   prefers-reduced-motion.  Scoping the transform to .motion inherits all
+   three gates for free.  The 50vw/50vh fallbacks are load-bearing: --px does
+   not exist until the first pointermove, and a var() without one would make
+   the whole transform invalid until then. */
+.bubbles{position:fixed;inset:0;z-index:-1;pointer-events:none;overflow:hidden;
+  /* One knob over the whole field, ahead of the per-bubble alphas.  .78, not
+     the .92 the mock used: the idle page here is short — content ends around
+     470px and the rest of the viewport is bare paper — so the lower half of
+     the field has nothing in front of it and reads heavier than it did
+     against a taller mock. */
+  opacity:.78;
+  --par:-.026}   /* px of travel per px of pointer offset, per unit of depth */
+.bubbles span{position:absolute;left:var(--x);top:var(--y)}
+.motion .bubbles span{
+  transform:translate3d(
+    calc((var(--px,50vw) - 50vw) * var(--par) * var(--d)),
+    calc((var(--py,50vh) - 50vh) * var(--par) * var(--d)),0);
+  /* Re-armed every frame by motion.js, so this reads as an exponential ease
+     rather than a 700ms tween.  The lag is what sells the depth. */
+  transition:transform 700ms cubic-bezier(.22,.61,.36,1)}
+
+.bubbles i{position:relative;display:block;
+  width:var(--size);height:var(--size);margin:calc(var(--size) / -2);
+  border-radius:50%;opacity:var(--alpha);filter:blur(var(--blur));
+  animation:bubble-drift var(--dur) var(--delay) ease-in-out infinite alternate;
+  /* Lighter and *cooler* than the warm paper, plus a small off-centre
+     specular.  On #FAF8F4 the cool cast is what separates a bubble from a
+     smudge. */
+  background:
+    radial-gradient(circle at 33% 26%,
+      rgba(255,255,255,.98) 0%,rgba(255,255,255,.55) 9%,rgba(255,255,255,0) 22%),
+    radial-gradient(circle at 42% 36%,
+      rgba(253,254,255,.80) 0%,rgba(252,253,255,.46) 44%,
+      rgba(251,252,255,.22) 72%,rgba(251,252,255,.05) 90%,
+      rgba(251,252,255,0) 100%)}
+
+/* Rim: a specular edge weighted away from the key light, then the faintest
+   contact shadow just outside it.  The shadow does more work than the
+   highlight — a white sphere on near-white paper is visible by what it
+   displaces, not by what it adds. */
+.bubbles i::before{content:"";position:absolute;inset:0;border-radius:50%;
+  background:
+    radial-gradient(circle at 58% 64%,
+      rgba(255,255,255,0) 58%,rgba(255,255,255,.95) 78%,
+      rgba(255,255,255,.42) 90%,rgba(255,255,255,0) 100%),
+    radial-gradient(circle,
+      rgba(255,255,255,0) 82%,rgba(122,112,99,.17) 94%,rgba(122,112,99,0) 100%)}
+
+/* Thin-film iridescence, masked to an annulus.  Three things are deliberate.
+   The ramp sweeps 0→4→0 so the hue shifts *around* the ring; a loop that
+   returns warm-cool-warm reads as a flat pink stain instead.  The three warm
+   stops are mixed weaker and given a narrower arc than the two cool ones, or
+   the oxblood end swamps the whole effect.  And there is no mix-blend-mode:
+   filter:blur() above creates a stacking context, so multiply would blend
+   against the bubble's own sheen and never reach the paper at all.
+   The stops are tokens.css's helix ramp, unchanged — this ground and the
+   landing-page helix read from one palette. */
+.bubbles i::after{content:"";position:absolute;inset:0;border-radius:50%;
+  --m0:color-mix(in srgb,var(--helix-stop-0) 66%,transparent);
+  --m1:color-mix(in srgb,var(--helix-stop-1) 58%,transparent);
+  --m2:color-mix(in srgb,var(--helix-stop-2) 44%,transparent);
+  --m3:color-mix(in srgb,var(--helix-stop-3) 42%,transparent);
+  --m4:color-mix(in srgb,var(--helix-stop-4) 46%,transparent);
+  background:conic-gradient(from 196deg,
+    var(--m0) 0%,var(--m0) 10%,var(--m1) 27%,var(--m2) 41%,var(--m3) 47%,
+    var(--m4) 52%,var(--m3) 58%,var(--m2) 67%,var(--m1) 83%,
+    var(--m0) 93%,var(--m0) 100%);
+  -webkit-mask:radial-gradient(circle,#0000 40%,#0006 62%,#000 78%,#000 94%,#0000 100%);
+          mask:radial-gradient(circle,#0000 40%,#0006 62%,#000 78%,#000 94%,#0000 100%);
+  opacity:var(--irid)}
+
+/* 46-80s per cycle.  Motion in peripheral vision while someone reads clinical
+   prose is a legibility problem, not a mood — this has to stay invisible
+   unless you go looking for it.
+   Reduced motion needs nothing here: site.css collapses every animation to
+   .01ms with one iteration, which parks each bubble on a static frame. */
+@keyframes bubble-drift{
+  from{transform:translate3d(0,0,0) scale(1)}
+  to{transform:translate3d(var(--dx),var(--dy),0) scale(var(--scale))}
+}
+
+/* Below 900px .split is a single column and the answer card fills the
+   viewport, so the field is invisible — measured, not assumed.  Painting nine
+   blurred gradients for nothing is worst on exactly the weakest devices. */
+@media(max-width:900px){.bubbles{display:none}}
+
 .ask{padding:var(--s8) 0 var(--s4)}
 .ask form{display:flex;gap:var(--s3);flex-wrap:wrap;align-items:center}
 .ask .field{flex:1 1 320px;position:relative}
@@ -172,6 +271,37 @@
 {% endblock %}
 
 {% block content %}
+
+{# Ambient bubble field.  Decorative: aria-hidden, pointer-events:none, and
+   painted at z-index:-1 behind every opaque card.  Written into the DOM rather
+   than injected by JS so it is present at first paint and survives JavaScript
+   being off — the same principle the hero's steps are built on.
+
+   Per bubble: --x/--y place it, --d is its parallax depth (smaller = further
+   away = moves less), --size/--blur/--alpha/--irid describe it, and
+   --dur/--delay/--dx/--dy/--scale describe its drift.  Nothing here is read by
+   JavaScript; the stylesheet owns all of it. #}
+<div class="bubbles" aria-hidden="true">
+  <span style="--x:9%;--y:20%;--d:.34"><i style="--size:560px;--blur:23px;
+    --alpha:.52;--irid:.36;--dur:72s;--delay:-4s;--dx:44px;--dy:-38px;--scale:1.05"></i></span>
+  <span style="--x:88%;--y:30%;--d:.26"><i style="--size:640px;--blur:28px;
+    --alpha:.46;--irid:.29;--dur:78s;--delay:-26s;--dx:-40px;--dy:44px;--scale:1.06"></i></span>
+  <span style="--x:70%;--y:74%;--d:.52"><i style="--size:480px;--blur:17px;
+    --alpha:.62;--irid:.54;--dur:62s;--delay:-14s;--dx:-34px;--dy:-40px;--scale:1.05"></i></span>
+  <span style="--x:22%;--y:70%;--d:.80"><i style="--size:300px;--blur:8px;
+    --alpha:.78;--irid:.80;--dur:54s;--delay:-8s;--dx:40px;--dy:32px;--scale:1.07"></i></span>
+  <span style="--x:46%;--y:96%;--d:.60"><i style="--size:400px;--blur:14px;
+    --alpha:.58;--irid:.50;--dur:68s;--delay:-18s;--dx:-26px;--dy:-46px;--scale:1.04"></i></span>
+  <span style="--x:95%;--y:88%;--d:.92"><i style="--size:260px;--blur:6px;
+    --alpha:.82;--irid:.88;--dur:50s;--delay:-2s;--dx:-30px;--dy:-34px;--scale:1.08"></i></span>
+  <span style="--x:4%;--y:82%;--d:.70"><i style="--size:340px;--blur:10px;
+    --alpha:.70;--irid:.70;--dur:58s;--delay:-20s;--dx:34px;--dy:-28px;--scale:1.06"></i></span>
+  <span style="--x:58%;--y:-4%;--d:.30"><i style="--size:520px;--blur:26px;
+    --alpha:.42;--irid:.25;--dur:80s;--delay:-34s;--dx:-24px;--dy:40px;--scale:1.05"></i></span>
+  <span style="--x:34%;--y:44%;--d:1.10"><i style="--size:180px;--blur:4px;
+    --alpha:.72;--irid:.92;--dur:46s;--delay:-11s;--dx:26px;--dy:-30px;--scale:1.09"></i></span>
+</div>
+
 <div class="wrap">
 
   <div class="ask">
