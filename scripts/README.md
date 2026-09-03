@@ -38,6 +38,7 @@ Run everything with the project runtime: `.venv312/bin/python scripts/<name>.py`
 
 | Script | Purpose |
 |---|---|
+| `oci_retry_apply.sh` | Retries an OCI Resource Manager stack apply until Always Free ARM capacity appears. Paces attempts so Oracle does not throttle you, backs off harder on 429, and stops on any failure that is not `Out of host capacity` rather than looping on a real error. |
 | `stage_corpus.sh` | Assembles exactly the files the private HF dataset needs (index, chunks, WebP thumbnails) into an upload directory, ~549 MB. Refuses to stage a git-lfs pointer, `data/`, or the 3.8 GB full-res renders. Exists because `hf upload <repo> .` from the repo root would upload roughly 5 GB. |
 | `sync_space.sh` | Assembles a Hugging Face Space checkout from an allowlist, then verifies what landed: aborts on `data/`, `storage/`, `artifacts/`, `backend/.env`, or any file over 5 MB. Exists because the licensed corpus is tracked in git history, so adding the Space as a remote and pushing would publish the textbook. |
 | `fetch_corpus.py` | Pulls `artifacts/vectorstore/` and `storage/pages/small/` from a private HF dataset before the API starts. Run by `entrypoint.sh`, never by the app: `backend/api/main.py` mounts `StaticFiles("storage/pages")` at import, so this must finish before that import happens, and import-time purity forbids it living under `backend/`. No-op when the corpus is already on disk. |
