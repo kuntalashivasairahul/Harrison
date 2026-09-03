@@ -151,21 +151,56 @@ and do not let them into general context.
 
 ## Deploy Configuration (configured by /setup-deploy)
 
-- **Platform:** Hugging Face Space, Docker SDK, free CPU basic (2 vCPU, 16 GB
-  RAM, 50 GB disk, no credit card). Chosen because the measured production
-  footprint is **1.47 GB peak RSS** (FAISS 16,983 vectors + BM25 corpus +
-  BGE-M3 + cross-encoder, 23 s warm-up). Render's free tier is 512 MB, Fly's
-  free allowances are gone, and Vercel/Netlify have no long-lived process, so
-  this is the only free tier that actually holds the app.
-- **Production URL:** `https://<user>-harrisongpt.hf.space` (share this, not
-  the `huggingface.co/spaces/...` page, which embeds the app in an iframe).
-- **Deploy trigger:** `git push` to the Space remote. HF rebuilds the image.
-- **Deploy status:** the Space build log, plus the health check below.
-- **Post-deploy health check:** `GET /health`. Returns 503 when degraded, so it
-  is a real check. `curl -sf https://<user>-harrisongpt.hf.space/health`
-- **Merge method:** squash.
+### Hugging Face Spaces is ruled out — do not retry it
+
+Investigated 2026-09-03 and closed. Every path through the free tier is shut,
+and none of this is stated in the docs or on the pricing page; it is only
+visible signed in, on the create-Space page.
+
+| SDK | Free? | Why it fails |
+|---|---|---|
+| Docker | **Paid** | `Paid` badge on the SDK tile. PRO ($9/mo) required. |
+| Gradio | Free, **ZeroGPU only** | Tooltip: "On the free tier, Gradio Spaces run on ZeroGPU. Subscribe to PRO for unlocking free cpu-basic flavor." ZeroGPU's supervisor owns port 7860, so a custom `uvicorn.run()` dies with `[Errno 98] address already in use`. Proven on a throwaway Space. |
+| Static | Free | Static HTML only. No Python, no FastAPI, no FAISS. |
+
+Hardware switching is also PRO-gated, so a Space created on ZeroGPU cannot be
+moved to cpu-basic afterwards.
+
+`deploy/README.hf.md` and `scripts/sync_space.sh` are kept: the sync script's
+allowlist-plus-verify approach applies to any code-only deploy target, and the
+frontmatter costs nothing to retain if the tier ever reopens.
+
+### Target: a host we control (Oracle Cloud Always Free)
+
+Chosen because the measured production footprint is **1.47 GB peak RSS**
+(FAISS 16,983 vectors + BM25 corpus + BGE-M3 + cross-encoder, 18-23 s warm-up),
+and free tiers that fit it are nearly extinct: Render is 512 MB, Koyeb 512 MB,
+Fly and Railway no longer have free tiers, and Cloud Run bills above its
+allowance. Oracle's Always Free ARM (2 OCPU / 12 GB as of the 2026-08-18
+reduction) is 8x what we need.
+
+- **Deploy trigger:** rebuild `--platform linux/arm64` (native on an M4), ship
+  the image, `docker run --restart=always`.
+- **Post-deploy health check:** `GET /health`. Returns 503 when degraded.
 - **Project type:** FastAPI web app, server-rendered UI (Jinja2 + `/static`),
   no separate frontend build.
+
+**Oracle-specific, both mandatory:**
+
+1. **Publish to localhost only** (`-p 127.0.0.1:7860:7860`) with Caddy in
+   front, and narrow `--forwarded-allow-ips` to `127.0.0.1`. The wildcard was
+   safe on a platform where only its proxy could reach the container. With
+   direct public ingress it is a live hole: `main.py:172` keys the rate limiter
+   on `request.client.host`, which uvicorn rewrites from `X-Forwarded-For`, so
+   a spoofed header defeats the 30/min limit and drains the Gemini key pool.
+2. **Oracle stops idle Always Free instances.** A demo idles at near-zero CPU
+   and ~12% memory, which is exactly the reclaim profile. Point a free uptime
+   monitor at `/health` every 5 minutes; that is real traffic and real signal,
+   not quota gaming.
+
+Also: Oracle's Ubuntu images ship iptables rules that block 80/443 even after
+the cloud-side security list is opened. Both layers need changing.
+
 
 ### Two repos, on purpose
 
@@ -225,7 +260,7 @@ mixed content, and the cited-pages rail silently renders broken images. The
 wildcard is safe only because nothing but the platform proxy can reach the
 container; narrow it for any deploy with direct public ingress.
 
-### Space secrets (Settings > Variables and secrets)
+### Secrets (Space settings, or the .env mounted into the container)
 
 `HF_TOKEN` (read-scoped, for the private dataset), `HARRISON_CORPUS_REPO`,
 `GEMINI_API_KEY` plus `GEMINI_API_KEY_1..10`, optionally `GROQ_API_KEY` +
@@ -235,7 +270,7 @@ renders are not deployed, and the flag makes `resolve_page_urls()` point
 `full_url` at the thumbnail instead of a 404. All three `visual_context` keys
 stay present, so the frozen `QueryResponse` shape is unchanged.
 
-### Build on the M4 with `--platform linux/amd64`
+### Build on the M4 with an explicit `--platform`
 
 `docker build --platform linux/amd64 -t harrisongpt .` Apple Silicon builds
 arm64 by default; Spaces run x86_64, and `torch` and `faiss-cpu` ship different
@@ -244,7 +279,7 @@ locally and can still fail on the Space. torch comes from
 `download.pytorch.org/whl/cpu` deliberately: the default PyPI amd64 wheel
 bundles a CUDA runtime this image will never use.
 
-### Known free-tier behaviour, not bugs
+### Known free-tier behaviour, not bugs (host-dependent)
 
 - Spaces pause after 48 h idle. A cold wake pays the corpus pull plus the 23 s
   warm-up, so the first visitor waits roughly two minutes.
