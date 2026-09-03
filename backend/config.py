@@ -25,6 +25,23 @@ ARTIFACTS_DIR = PROJECT_ROOT / "artifacts"
 VECTORSTORE_DIR = ARTIFACTS_DIR / "vectorstore"
 LOG_DIR = ARTIFACTS_DIR / "retrieval_logs"
 
+# Page renders.  storage/pages/full is 3.8 GB of full-resolution PNGs, which a
+# free-tier deploy cannot carry -- a paused Space re-pulls its corpus on every
+# wake, so shipping the full renders would mean a 4.3 GB cold start instead of
+# a 0.5 GB one.  When they are absent the lightbox falls back to the WebP
+# thumbnail rather than opening a 404.
+#
+# This lives here rather than in backend/rendering/ for two reasons: rendering/
+# may import only `re` and `typing` (RULE 2.1), and config is the one module
+# that runs load_dotenv().  api/main.py reads it and passes it down, which is
+# also why there is no os.getenv() for it at a call site.
+PAGE_FULL_RES_AVAILABLE = os.getenv("HARRISON_PAGE_FULL_RES", "true").strip().lower() not in (
+    "0",
+    "false",
+    "no",
+    "off",
+)
+
 # Models
 EMBEDDING_MODEL = "BAAI/bge-m3"
 EMBEDDING_DIM = 1024

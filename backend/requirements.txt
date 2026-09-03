@@ -21,6 +21,14 @@ sentence-transformers==5.6.0
 torch==2.12.1
 transformers==5.12.1
 
+# --- Deployment ---
+# Already present transitively (sentence-transformers requires it); pinning it
+# is a reproducibility control, not a new dependency, per the note on pydantic
+# and torch above.  scripts/fetch_corpus.py imports it directly to pull the
+# licensed corpus from a private HF dataset at container boot, so an unpinned
+# resolve could change that code path without touching this file.
+huggingface_hub==1.21.0
+
 # --- LLM providers ---
 google-genai==2.10.0
 groq==1.6.0

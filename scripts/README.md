@@ -34,6 +34,14 @@ Run everything with the project runtime: `.venv312/bin/python scripts/<name>.py`
 | `probe_st.py` | Minimal sentence-transformers smoke test. |
 | `probe_faiss_st.py` | Minimal FAISS + sentence-transformers smoke test. |
 
+## Deployment
+
+| Script | Purpose |
+|---|---|
+| `stage_corpus.sh` | Assembles exactly the files the private HF dataset needs (index, chunks, WebP thumbnails) into an upload directory, ~549 MB. Refuses to stage a git-lfs pointer, `data/`, or the 3.8 GB full-res renders. Exists because `hf upload <repo> .` from the repo root would upload roughly 5 GB. |
+| `sync_space.sh` | Assembles a Hugging Face Space checkout from an allowlist, then verifies what landed: aborts on `data/`, `storage/`, `artifacts/`, `backend/.env`, or any file over 5 MB. Exists because the licensed corpus is tracked in git history, so adding the Space as a remote and pushing would publish the textbook. |
+| `fetch_corpus.py` | Pulls `artifacts/vectorstore/` and `storage/pages/small/` from a private HF dataset before the API starts. Run by `entrypoint.sh`, never by the app: `backend/api/main.py` mounts `StaticFiles("storage/pages")` at import, so this must finish before that import happens, and import-time purity forbids it living under `backend/`. No-op when the corpus is already on disk. |
+
 ## Environment setup
 
 | Script | Purpose |

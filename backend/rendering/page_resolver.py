@@ -80,6 +80,7 @@ _PAGE_LABEL_RE = re.compile(r"^p\.(\d+)$", re.IGNORECASE)
 def resolve_page_urls(
     sources: list[str],
     base_url: str,
+    full_res_available: bool = True,
 ) -> list[dict[str, str]]:
     """
     Convert source page labels into image URL dictionaries.
@@ -94,6 +95,13 @@ def resolve_page_urls(
         Scheme + host (+ optional port) of the API server, with **no**
         trailing slash.  Example: ``"http://127.0.0.1:8000"`` or
         ``"https://harrisonqpt.example.com"``.
+    full_res_available:
+        Whether ``storage/pages/full/`` was actually deployed.  When ``False``
+        the ``full_url`` of every entry points at the thumbnail instead of a
+        full-resolution PNG that is not on disk.  Callers pass
+        ``config.PAGE_FULL_RES_AVAILABLE``; this module cannot read it itself,
+        because ``rendering/`` may import only ``re`` and ``typing``
+        (CODING_RULES 2.1).
 
     Returns
     -------
@@ -121,13 +129,25 @@ def resolve_page_urls(
         # a non-positive page number (should not happen in practice).
         actual_image_page: int = max(1, faiss_page - FAISS_TO_IMAGE_OFFSET)
 
+        thumbnail_url = f"{base}/pages/small/page_{actual_image_page}_small.webp"
+
         result.append(
             {
                 # page_label preserves the original FAISS citation number
                 # so in-text references remain consistent with the UI labels.
                 "page_label":    label,
-                "thumbnail_url": f"{base}/pages/small/page_{actual_image_page}_small.webp",
-                "full_url":      f"{base}/pages/full/page_{actual_image_page}_full.png",
+                "thumbnail_url": thumbnail_url,
+                # A deploy may carry only the small WebP renders: storage/pages/full
+                # is 3.8 GB, which on a free-tier host means re-pulling it on every
+                # cold wake.  Point full_url at the thumbnail rather than at a file
+                # that is not there, so the lightbox opens a lower-resolution image
+                # instead of a 404.  All three keys stay present either way -- the
+                # QueryResponse field set is frozen (RULE 3.2).
+                "full_url": (
+                    f"{base}/pages/full/page_{actual_image_page}_full.png"
+                    if full_res_available
+                    else thumbnail_url
+                ),
             }
         )
 

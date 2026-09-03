@@ -148,3 +148,109 @@ and do not let them into general context.
   KeyManager rotates keys per project.
 - Anything in `scripts/` is documented in `scripts/README.md`. Check there
   before assuming a script is dead.
+
+## Deploy Configuration (configured by /setup-deploy)
+
+- **Platform:** Hugging Face Space, Docker SDK, free CPU basic (2 vCPU, 16 GB
+  RAM, 50 GB disk, no credit card). Chosen because the measured production
+  footprint is **1.47 GB peak RSS** (FAISS 16,983 vectors + BM25 corpus +
+  BGE-M3 + cross-encoder, 23 s warm-up). Render's free tier is 512 MB, Fly's
+  free allowances are gone, and Vercel/Netlify have no long-lived process, so
+  this is the only free tier that actually holds the app.
+- **Production URL:** `https://<user>-harrisongpt.hf.space` (share this, not
+  the `huggingface.co/spaces/...` page, which embeds the app in an iframe).
+- **Deploy trigger:** `git push` to the Space remote. HF rebuilds the image.
+- **Deploy status:** the Space build log, plus the health check below.
+- **Post-deploy health check:** `GET /health`. Returns 503 when degraded, so it
+  is a real check. `curl -sf https://<user>-harrisongpt.hf.space/health`
+- **Merge method:** squash.
+- **Project type:** FastAPI web app, server-rendered UI (Jinja2 + `/static`),
+  no separate frontend build.
+
+### Two repos, on purpose
+
+| Repo | Visibility | Contents |
+|---|---|---|
+| `spaces/<user>/harrisongpt` | public | code only |
+| `datasets/<user>/harrison-corpus` | **private** | `artifacts/vectorstore/{index.faiss,chunks.json}`, `storage/pages/small/*` |
+
+`chunks.json` is ~33 MB of verbatim Harrison's prose and `storage/pages/` is
+4.2 GB of scans of it. Both are licensed content under RULE 3.1, so neither may
+sit in a public repo or a public image layer. The dataset mirrors the app's own
+paths, so one `snapshot_download` lands every file where the code already looks
+for it.
+
+### Never add the Space as a git remote of this repo
+
+The licensed files are **tracked, and they are in the commit history**:
+
+```
+$ git ls-files | grep -E '^(artifacts|data)/'
+artifacts/vectorstore/chunks.json                   33 MB of verbatim textbook
+artifacts/vectorstore/index.faiss
+artifacts/vectorstore_backup/.../chunks.json
+artifacts/vectorstore_staging/table_chunks.json
+data/harrison.md                                    30 MB, the whole book
+```
+
+`git push space main` would publish all of it to a public Space, history
+included. `.gitignore` does not untrack what is already tracked, and
+`.dockerignore` governs the image, not the push — it gives no protection here
+at all. A push you cannot recall is the failure mode this whole two-repo split
+exists to prevent.
+
+The Space gets its **own clean history** with only deploy files in it. Use
+`scripts/sync_space.sh <space-checkout>`, which copies from an allowlist and
+then verifies what actually landed: it aborts if `data/`, `storage/`,
+`artifacts/` or `backend/.env` appear, or if any file exceeds 5 MB (a code-only
+deploy has none; the largest legitimate file is vendored three.js at well under
+1 MB). A correct sync is 56 files and about 1.2 MB.
+
+### Boot order is load-bearing
+
+`entrypoint.sh` runs `scripts/fetch_corpus.py` **before** uvicorn, because
+`backend/api/main.py` mounts `StaticFiles("storage/pages")` at import time and
+StaticFiles raises when the directory is missing. The FastAPI `lifespan`
+handler runs too late to fix this, and import-time purity forbids the download
+living under `backend/`. Do not move the fetch into the app.
+
+### uvicorn flags that are not optional
+
+`--proxy-headers --forwarded-allow-ips="*"`. `main.py` builds every page-image
+URL from `str(request.base_url)`. Behind HF's HTTPS proxy, uvicorn honours
+`X-Forwarded-Proto` only from IPs in `--forwarded-allow-ips` (default
+`127.0.0.1`), which the platform proxy is not. Without the wildcard, `base_url`
+resolves to `http://` on an `https://` page, every thumbnail is blocked as
+mixed content, and the cited-pages rail silently renders broken images. The
+wildcard is safe only because nothing but the platform proxy can reach the
+container; narrow it for any deploy with direct public ingress.
+
+### Space secrets (Settings > Variables and secrets)
+
+`HF_TOKEN` (read-scoped, for the private dataset), `HARRISON_CORPUS_REPO`,
+`GEMINI_API_KEY` plus `GEMINI_API_KEY_1..10`, optionally `GROQ_API_KEY` +
+`GROQ_ENABLED=true`, and `HARRISON_ADMIN_TOKEN` (without it `main.py` warns and
+disables `/admin/*`). Set `HARRISON_PAGE_FULL_RES=false`: the 3.8 GB full-res
+renders are not deployed, and the flag makes `resolve_page_urls()` point
+`full_url` at the thumbnail instead of a 404. All three `visual_context` keys
+stay present, so the frozen `QueryResponse` shape is unchanged.
+
+### Build on the M4 with `--platform linux/amd64`
+
+`docker build --platform linux/amd64 -t harrisongpt .` Apple Silicon builds
+arm64 by default; Spaces run x86_64, and `torch` and `faiss-cpu` ship different
+wheels per architecture. An unqualified build produces an image that works
+locally and can still fail on the Space. torch comes from
+`download.pytorch.org/whl/cpu` deliberately: the default PyPI amd64 wheel
+bundles a CUDA runtime this image will never use.
+
+### Known free-tier behaviour, not bugs
+
+- Spaces pause after 48 h idle. A cold wake pays the corpus pull plus the 23 s
+  warm-up, so the first visitor waits roughly two minutes.
+- Disk is ephemeral, so `artifacts/semantic_cache.json` starts empty on every
+  wake. `CACHE_SCHEMA_VERSION` still matters locally; on the Space nothing
+  survives to be retired.
+- The rate limiter in `main.py` is in-process and assumes a single worker.
+  Free tier runs one container, so that holds. It stops holding if you ever
+  scale out.

@@ -1,0 +1,44 @@
+# The build context must stay small.  storage/ alone is 4.2 GB and data/ is
+# 649 MB; sending either to the daemon turns a 30-second build into a
+# multi-minute one and bloats every layer that follows.  The licensed corpus
+# reaches the container at runtime via scripts/fetch_corpus.py, never through
+# the image.
+
+# Licensed content (RULE 3.1) — never baked into an image.
+data/
+storage/
+artifacts/
+
+# Local runtime and caches.
+.venv312/
+.venv/
+**/__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+
+# VCS and tooling state.
+.git/
+.github/
+.gstack/
+.serena/
+.agent/
+.claude/
+.impeccable/
+.playwright-mcp/
+.DS_Store
+
+# Secrets must arrive as Space secrets, never in a layer.
+backend/.env
+.env
+
+# Tooling state that lives inside backend/.
+backend/api/.impeccable/
+
+# Not needed at runtime.  Note: *.md is NOT excluded wholesale -- RULE 6.1
+# requires the vendored three.js LICENSE and README.md ship next to the code,
+# and backend/api/static/vendor/three/ carries both.
+tests/
+evaluation/
+docs/
+/*.md

@@ -39,6 +39,26 @@ class TestResolvePageUrls(unittest.TestCase):
             image_page = int(entry["thumbnail_url"].split("page_")[1].split("_small")[0])
             self.assertEqual(label_page - image_page, FAISS_TO_IMAGE_OFFSET)
 
+    def test_full_url_falls_back_to_the_thumbnail_when_full_renders_are_absent(self):
+        """A free-tier deploy ships only storage/pages/small.
+
+        Without this, full_url points at a PNG that was never deployed and the
+        lightbox opens a 404.  The fallback must keep all three keys present:
+        the QueryResponse field set is frozen (RULE 3.2), so dropping full_url
+        would break the contract rather than degrade it.
+        """
+        [entry] = resolve_page_urls(["p.2787"], self.BASE, full_res_available=False)
+
+        self.assertEqual(set(entry), {"page_label", "thumbnail_url", "full_url"})
+        self.assertEqual(entry["full_url"], entry["thumbnail_url"])
+        self.assertNotIn("/pages/full/", entry["full_url"])
+
+    def test_full_res_defaults_to_available_so_existing_callers_are_unchanged(self):
+        [with_default] = resolve_page_urls(["p.2787"], self.BASE)
+        [explicit] = resolve_page_urls(["p.2787"], self.BASE, full_res_available=True)
+        self.assertEqual(with_default, explicit)
+        self.assertIn("/pages/full/", with_default["full_url"])
+
     def test_input_order_is_preserved(self):
         entries = resolve_page_urls(["p.900", "p.100", "p.500"], self.BASE)
         self.assertEqual([e["page_label"] for e in entries], ["p.900", "p.100", "p.500"])

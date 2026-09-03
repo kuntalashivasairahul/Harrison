@@ -1,6 +1,7 @@
 # backend/main.py
 
 import logging
+import mimetypes
 import os
 import secrets
 import threading
@@ -29,6 +30,7 @@ from backend.config import (
     EMBEDDING_DIM,
     EMBEDDING_MODEL,
     LLM_TOTAL_REQUEST_BUDGET_SECONDS,
+    PAGE_FULL_RES_AVAILABLE,
     RERANK_MODEL,
     RERANK_SCORE_THRESHOLD,
     RRF_K,
@@ -213,6 +215,15 @@ def require_admin(x_admin_token: str = Header(default="")) -> None:
 # storage/pages/small/  →  /pages/small/<filename>
 # storage/pages/full/   →  /pages/full/<filename>
 # --------------------------------------------------------------------
+# Debian slim ships no /etc/mime.types and Python's built-in table has no .webp
+# entry, so StaticFiles guesses application/octet-stream for every page
+# thumbnail inside the container -- while macOS, which has
+# /etc/apache2/mime.types, serves image/webp and hides the problem.  Browsers
+# sniff image bytes for <img src>, so the rail still renders either way, but
+# the header is wrong and anything that caches or proxies on Content-Type
+# behaves differently in prod than on the dev box.  Register it explicitly.
+mimetypes.add_type("image/webp", ".webp")
+
 _STORAGE_DIR = Path(__file__).resolve().parents[2] / "storage" / "pages"
 _STORAGE_DIR.mkdir(parents=True, exist_ok=True)   # ensure dir exists at startup
 app.mount("/pages", StaticFiles(directory=str(_STORAGE_DIR)), name="pages")
@@ -472,6 +483,7 @@ def ask_question(req: QueryRequest, request: Request) -> QueryResponse:
             visual_context=resolve_page_urls(
                 sources=cached.get("sources", []),
                 base_url=str(request.base_url).rstrip("/"),
+                full_res_available=PAGE_FULL_RES_AVAILABLE,
             ),
             timings=timings,
         )
@@ -678,6 +690,7 @@ def ask_question(req: QueryRequest, request: Request) -> QueryResponse:
     visual_context: list[dict[str, str]] = resolve_page_urls(
         sources=sources,
         base_url=base_url,
+        full_res_available=PAGE_FULL_RES_AVAILABLE,
     )
 
     # ── Persist only fully verified responses to semantic cache ──
