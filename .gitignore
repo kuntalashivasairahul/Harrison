@@ -15,8 +15,13 @@ artifacts/vectorstore_staging/
 artifacts/vectorstore_backup/
 artifacts/retrieval_logs/
 *.faiss
-!artifacts/vectorstore/index.faiss
-!artifacts/vectorstore/chunks.json
+# The corpus is licensed content (RULE 3.1) and is NOT versioned here.  It
+# was, until 2026-09-03, via two "!" negations that used to sit right below
+# *.faiss -- that is exactly how 190 MB of Harrison's reached a public repo.
+# Do not re-add them.  docs/CORPUS.md says where the corpus lives instead.
+artifacts/vectorstore/
+!artifacts/vectorstore/README.md
+data/
 
 # Visual Assets (Ignores the 8,000+ images)
 storage/pages/

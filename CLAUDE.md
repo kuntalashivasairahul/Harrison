@@ -41,8 +41,11 @@ virtualenv; if you find one, it is a mistake.
 .venv312/bin/python -m uvicorn backend.api.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-`git-lfs` is a prerequisite. Without it `artifacts/vectorstore/*` checks out as
-pointer files and the API starts degraded.
+The corpus is **not in this repo** and `git-lfs` is no longer a prerequisite;
+history was rewritten on 2026-09-03 to remove 190 MB of licensed content.
+A fresh clone starts without `artifacts/vectorstore/*`, so the API starts
+degraded until you restore it. See `docs/CORPUS.md` for all three retrieval
+paths (local archive, private HF dataset, rebuild from source).
 
 ## Testing rules that are easy to get wrong
 

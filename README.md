@@ -41,13 +41,11 @@ For a detailed walkthrough, step-by-step trace, and sequence diagram of how cont
 ### 1. Prerequisites
 * Python 3.12
 * Virtual Environment manager (venv)
-* [git-lfs](https://git-lfs.com) — the FAISS index and chunk registry are
-  tracked in LFS. Install it **before** cloning:
-  ```bash
-  brew install git-lfs && git lfs install   # macOS
-  ```
-  Without it, `artifacts/vectorstore/*` checks out as small text pointer files
-  and the API starts in a degraded state.
+* The corpus — the FAISS index and chunk registry are **not in this repo**.
+  They are licensed content, so a fresh clone starts without them and the
+  API reports `status: "degraded"` on `/health` until you supply them.
+  `docs/CORPUS.md` covers all three retrieval paths. `git-lfs` is no longer
+  required.
 
 ### 2. Environment Setup
 Clone the repository. The checked-in production vectorstore under
@@ -125,7 +123,7 @@ The server will start at `http://127.0.0.1:8000`.
 ### Portable Assets
 
 The production retrieval index is committed so a normal `git clone` can answer
-questions without rebuilding embeddings. It is tracked in **git-lfs**
+questions without rebuilding embeddings. It is **not** tracked in git (see `docs/CORPUS.md`)
 (see `.gitattributes`), so rebuilding the index no longer adds its full size to
 git history on every commit. Note that the copies committed before LFS was
 adopted remain as ordinary blobs in history — this stops future growth, it does
