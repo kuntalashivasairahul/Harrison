@@ -355,7 +355,18 @@ def split_into_sections(md: str) -> List[dict]:
                 "marker_count": count_markers_in(preamble),
             })
 
+    table_heading = None
     for idx, (line_i, level, heading_text) in enumerate(heading_positions):
+        plain_heading = re.sub(r"[*_`]", "", heading_text).strip()
+        if re.match(r"TABLE\s+\d", plain_heading, re.IGNORECASE):
+            table_heading = heading_text
+        elif table_heading and (
+            plain_heading.lower() in {"or", "and", "major criteria", "minor criteria"}
+            or re.match(r"^[A-Z][.)]\s", plain_heading)
+        ):
+            heading_text = f"{table_heading} / {heading_text}"
+        else:
+            table_heading = None
         if idx + 1 < len(heading_positions):
             next_line_i = heading_positions[idx + 1][0]
         else:
@@ -609,7 +620,18 @@ def split_into_sections_with_offsets(md: str) -> List[dict]:
                 "body_start": 0,
             })
 
+    table_heading = None
     for idx, (line_i, level, heading_text) in enumerate(heading_positions):
+        plain_heading = re.sub(r"[*_`]", "", heading_text).strip()
+        if re.match(r"TABLE\s+\d", plain_heading, re.IGNORECASE):
+            table_heading = heading_text
+        elif table_heading and (
+            plain_heading.lower() in {"or", "and", "major criteria", "minor criteria"}
+            or re.match(r"^[A-Z][.)]\s", plain_heading)
+        ):
+            heading_text = f"{table_heading} / {heading_text}"
+        else:
+            table_heading = None
         if idx + 1 < len(heading_positions):
             next_line_i = heading_positions[idx + 1][0]
         else:
@@ -627,6 +649,41 @@ def split_into_sections_with_offsets(md: str) -> List[dict]:
         })
 
     return sections
+
+
+def repair_heading_metadata(source: Path, registry: Path) -> int:
+    """Restore table titles without changing chunk text, ordering, pages, or vectors."""
+    from bisect import bisect_right
+
+    md = source.read_text(encoding="utf-8")
+    sections = split_into_sections_with_offsets(md)
+    starts = [section["body_start"] for section in sections]
+    original = registry.read_bytes()
+    chunks = json.loads(original)
+    changed = 0
+    for chunk in chunks:
+        heading = re.sub(r"[*_`]", "", chunk.get("source_heading", "")).strip()
+        if not (heading.lower() in {"or", "and", "major criteria", "minor criteria"}
+                or re.match(r"^[A-Z][.)]\s", heading)):
+            continue
+        text = chunk.get("text", "")
+        position = md.find(text) if text else -1
+        if position < 0 or md.find(text, position + 1) >= 0:
+            continue
+        section = sections[bisect_right(starts, position) - 1]
+        if ("TABLE " not in section["heading"] or " / " not in section["heading"]
+                or position + len(text) > section["body_start"] + len(section["body"])):
+            continue
+        chunk["source_heading"] = section["heading"]
+        changed += 1
+    if changed:
+        backup = registry.with_suffix(".headings-backup.json")
+        if not backup.exists():
+            backup.write_bytes(original)
+        temporary = registry.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps(chunks, ensure_ascii=False, indent=2), encoding="utf-8")
+        temporary.replace(registry)
+    return changed
 
 
 def build_chunks(
@@ -1167,7 +1224,12 @@ def parse_args() -> argparse.Namespace:
             "rebuilding, re-embedding, or loading any models."
         ),
     )
-    return p.parse_args()
+    p.add_argument("--repair-headings", action="store_true",
+                   help="Repair production table-heading metadata without re-embedding; backs up chunks.json.")
+    args = p.parse_args()
+    if args.repair_headings and (args.dry_run or args.promote or args.promote_only or args.no_backup):
+        p.error("--repair-headings cannot be combined with dry-run or promotion options")
+    return args
 
 
 # ---------------------------------------------------------------------------
@@ -1176,6 +1238,10 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if args.repair_headings:
+        changed = repair_heading_metadata(args.source.resolve(), PROD_CHUNKS)
+        log.info("Repaired %d table headings; chunk text, pages and vectors are unchanged.", changed)
+        return
 
     # ── 0. Guard: staging and production must be different paths ─────────
     assert STAGING_INDEX.resolve() != PROD_INDEX.resolve(), (

@@ -41,6 +41,15 @@ def _tokenize(text: str) -> list[str]:
     return _TOKEN_RE.findall((text or "").lower())
 
 
+def _passage_text(chunk: dict) -> str:
+    """Keep the source section identity attached to fragmented passages."""
+    text = chunk.get("text", "")
+    heading = (chunk.get("source_heading") or "").strip()
+    if heading and not text.lstrip("# \n").startswith(heading):
+        return f"{heading}\n\n{text}"
+    return text
+
+
 # --------------------------------------------------------------------
 # LAZY VECTORSTORE LOADING
 # --------------------------------------------------------------------
@@ -79,7 +88,7 @@ def _load() -> dict[str, object]:
             loaded_index = None
 
         try:
-            corpus = [_tokenize(c.get("text", "")) for c in loaded_chunks]
+            corpus = [_tokenize(_passage_text(c)) for c in loaded_chunks]
             loaded_bm25 = BM25Okapi(corpus) if corpus else None
             if loaded_bm25 is not None:
                 log.info("BM25 index built over %d chunks.", len(corpus))
@@ -194,7 +203,7 @@ def _hybrid_candidates(
             if idx < 0 or idx >= len(chunks):
                 continue
             chunk = chunks[idx]
-            text = chunk.get("text", "")
+            text = _passage_text(chunk)
             existing = candidates_by_id.get(idx)
             base = {
                 "chunk_id": idx,
@@ -230,7 +239,7 @@ def _hybrid_candidates(
                 if idx < 0 or idx >= len(chunks):
                     continue
                 chunk = chunks[idx]
-                text = chunk.get("text", "")
+                text = _passage_text(chunk)
                 existing = candidates_by_id.get(idx)
                 bm25_info = {
                     "chunk_id": idx,
@@ -327,7 +336,7 @@ def _pretrim_for_rerank(
             if neighbor_id in by_id:
                 continue
             neighbor_chunk = chunks[neighbor_id]
-            neighbor_text = neighbor_chunk.get("text", "")
+            neighbor_text = _passage_text(neighbor_chunk)
             # neighbors still go through filtering
             if is_low_value_text(neighbor_text):
                 continue

@@ -14,7 +14,7 @@
 The request lifecycle for `/ask` is:
 
 1. `optimize_query()` calls the approved router: Groq first when explicitly enabled, Gemini Flash-Lite second, then a deterministic local fallback. It classifies the query, rejects non-medical requests, expands the search query, and labels complexity. This is the **only** query-expansion stage; the rule-based `expand_query()` that used to fan retrieval out over four templated variants has been removed.
-2. The API embeds the search query with `BAAI/bge-m3` and checks the semantic cache against exact runtime metadata.
+2. The API embeds the raw user query with `BAAI/bge-m3` and checks the semantic cache against exact runtime metadata.
 3. A cache miss runs a single hybrid FAISS/BM25 pass, RRF fusion (`RRF_K=60`), neighbor expansion (restricted to chunks within one page of their parent), cross-encoder reranking, and the `RERANK_SCORE_THRESHOLD=-3.0` hard filter.
 4. `route_and_sort_context()` deduplicates and page-orders chunks; `fuse_context()` constructs the prompt context within `SMART_SUMMARY_CONTEXT_CHAR_LIMIT` (default 12,000 characters).
 
@@ -58,6 +58,39 @@ heavy modules stubbed, and the full suite runs in ~3s with no network access.
 emitted during module import are captured. Modules obtain loggers with
 `logging.getLogger(__name__)`; reaching for `"uvicorn.error"` re-hides the
 problem that module exists to solve.
+
+---
+
+## 1b. Heading context, grounding, and cache eligibility
+
+Source section headings accompany passages through BM25, neighbor expansion,
+reranking, and prompt construction. The ingester preserves a table title across
+flat continuation headings such as `Major Criteria`, `A. ...`, and `or`.
+`--repair-headings` can repair legacy heading metadata without changing chunk
+text, order, page numbers, or existing vectors; see `docs/CORPUS.md`.
+
+Checklist, scoring, and mechanism/pathophysiology questions retain the wider
+retrieval depth even if the optimizer labels them simple. The relevance filter
+remains **-3.0** and RRF K remains **60**.
+When a criteria rewrite removes a hyphenated proper name such as `Duke-ISCVID`,
+the optimizer retains the raw query rather than erasing that retrieval key.
+
+Raw PDF page markers are removed before the authoritative chunk citation is
+added. The verifier receives the original question and the same context and
+additional evidence as the draft. Returned page citations, including shorthand
+groups such as `[p:10, 11]`, are checked against retrieved pages; optional chunk
+IDs must match the cited page. Invented citations and opening context refusals
+become `REFUSAL_STR`, with Low confidence and no source-image rail.
+
+An explicit context gap anywhere in an answer forces Low confidence without
+turning every partial caveat into a total refusal. Missing-FAISS responses are
+also capped at Low. Only complete, verified, citation-grounded responses without
+context-gap disclaimers from a loaded index are cached. Cache schema v6 retires
+older labels. These checks do not constitute a clinical completeness guarantee.
+
+The browser escapes answer text before applying its limited Markdown renderer;
+ordered/nested lists and italics are supported. `scripts/probe_chat_render.mjs`
+checks both the pure renderer and the actual answer-display call path.
 
 ---
 

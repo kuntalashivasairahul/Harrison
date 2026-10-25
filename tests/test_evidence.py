@@ -72,6 +72,17 @@ class TestExtractSourcesFormat(unittest.TestCase):
         self.assertEqual(result, ["p.1"])
 
 
+class TestCitationGrounding(unittest.TestCase):
+    def test_bare_grouped_and_chunk_citations_match_real_evidence(self):
+        from backend.processing.evidence import citations_are_grounded
+
+        chunks = [{"page": 10, "chunk_id": 2}, {"page": 11, "chunk_id": 3}]
+        for answer in ("Supported [p:10].", "Supported [p:10, p:11].", "Supported [p:10, 11].", "Supported [p:10|c:2]."):
+            self.assertTrue(citations_are_grounded(answer, chunks))
+        for answer in ("Unsupported [p:999].", "Wrong chunk [p:10|c:3].", "Malformed [p:10x].", "Valid [p:10] then malformed [p:999", "No citations"):
+            self.assertFalse(citations_are_grounded(answer, chunks))
+
+
 class TestExtractEvidence(unittest.TestCase):
     """extract_evidence() must emit EVIDENCE: <text> [p:PAGE] format."""
 

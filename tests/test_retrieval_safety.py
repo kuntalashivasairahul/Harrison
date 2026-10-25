@@ -104,5 +104,62 @@ class TestRetrievalSafety(unittest.TestCase):
         self.assertEqual(candidates[0]["bm25_score"], 1.5)
 
 
+class TestPassageHeadings(unittest.TestCase):
+    def test_heading_reaches_bm25_and_rerank_candidates_without_mutating_text(self):
+        chunk = {"page": 1, "source_heading": "Example decision criteria", "text": "A. first option"}
+        self.assertIn("Example decision criteria", rag._passage_text(chunk))
+        self.assertEqual(chunk["text"], "A. first option")
+        with patch.object(rag, "index", None), patch.object(rag, "chunks", [chunk]), \
+             patch.object(rag, "bm25", _FakeBm25()):
+            # Use one scored document; source headings must survive lexical retrieval.
+            with patch.object(rag.bm25, "get_scores", return_value=[1.0]):
+                result = rag._hybrid_candidates("example", k=1, bm25_k=1)
+        self.assertIn("Example decision criteria", result[0]["text"])
+
+    def test_existing_table_heading_is_not_duplicated(self):
+        chunk = {"source_heading": "Example", "text": "## Example\n\nA. first option"}
+        self.assertEqual(rag._passage_text(chunk), chunk["text"])
+
+
+class TestIngestionHeadings(unittest.TestCase):
+    def test_table_title_survives_flat_child_headings_and_stops_at_next_section(self):
+        from scripts.ingest_tables_aware import split_into_sections_with_offsets
+
+        md = ("## **TABLE 1-1 Example decision criteria**\n\n"
+              "## **Major Criteria**\nFirst\n"
+              "## **A. First group**\nSecond\n"
+              "## _or_\nThird\n"
+              "## **DIAGNOSIS**\nOutside\n")
+        sections = split_into_sections_with_offsets(md)
+        for section in sections[1:4]:
+            self.assertIn("TABLE 1-1", section["heading"])
+            self.assertTrue(md[section["body_start"]:].startswith(section["body"]))
+        self.assertEqual(sections[-1]["heading"], "**DIAGNOSIS**")
+
+
+class TestHeadingRepair(unittest.TestCase):
+    def test_repair_is_metadata_only_backed_up_and_idempotent(self):
+        import json
+        import tempfile
+        from pathlib import Path
+
+        from scripts.ingest_tables_aware import repair_heading_metadata
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.md"
+            registry = Path(directory) / "chunks.json"
+            source.write_text("## TABLE 1-1 Example criteria\n## _or_\nSecond choice.\n## Outside\nOther.\n")
+            chunks = [{"page": 3, "text": "Second choice.", "source_heading": "_or_", "chunk_type": "prose"}]
+            original = json.dumps(chunks).encode()
+            registry.write_bytes(original)
+            self.assertEqual(repair_heading_metadata(source, registry), 1)
+            updated = json.loads(registry.read_text())
+            self.assertIn("TABLE 1-1", updated[0]["source_heading"])
+            self.assertEqual(updated[0]["text"], chunks[0]["text"])
+            self.assertEqual(updated[0]["page"], chunks[0]["page"])
+            self.assertEqual(registry.with_suffix(".headings-backup.json").read_bytes(), original)
+            self.assertEqual(repair_heading_metadata(source, registry), 0)
+
+
 if __name__ == "__main__":
     unittest.main()

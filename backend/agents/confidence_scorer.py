@@ -122,6 +122,11 @@ def answer_declines(answer: str) -> bool:
     return match is not None and match.start() < _DECLINATION_WINDOW_CHARS
 
 
+def answer_has_context_gap(answer: str) -> bool:
+    """Recognize explicit context gaps anywhere without treating them as total refusals."""
+    return bool(_DECLINATION_RE.search(answer or ""))
+
+
 def calculate_confidence(
     chunks: list[dict],
     original_answer: str,
@@ -167,7 +172,7 @@ def calculate_confidence(
     └──────────────────────────────────────────────────────────┴────────┘
     """
     # ── Guard: no retrieval → no confidence ──────────────────────────────
-    if not chunks:
+    if not chunks or answer_has_context_gap(verified_answer):
         return "Low"
 
     # ── Signal 1: Average cross-encoder score across all chunks ──────────

@@ -140,7 +140,7 @@
 .doc h3:first-child{margin-top:0}
 .doc p,.doc li{font:17px/28px var(--serif);color:var(--ink-700);max-width:var(--measure)}
 .doc p{margin:0 0 var(--s3)}
-.doc ul{margin:0 0 var(--s3);padding-left:22px}
+.doc ul,.doc ol{margin:0 0 var(--s3);padding-left:22px}
 .doc li{margin-bottom:var(--s1)}
 .doc strong{color:var(--ink-900);font-weight:600}
 .doc .qr{background:var(--well);border-radius:var(--r-sm);padding:var(--s4) var(--s6);
@@ -152,6 +152,7 @@
   margin-left:3px;
   cursor:pointer;white-space:nowrap;vertical-align:baseline;
   transition:background var(--fast),border-color var(--fast)}
+.cite + .cite{margin-left:4px}
 .cite:hover{background:var(--accent-100);border-color:var(--accent-600)}
 .cite.inert{color:var(--ink-300);border-color:var(--ink-100);cursor:default}
 .cite.inert:hover{background:transparent;border-color:var(--ink-100)}

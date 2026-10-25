@@ -65,5 +65,29 @@ class TestQueryOptimizerRouting(unittest.TestCase):
         self.assertEqual(result["expanded_query"], "What causes chest pain?")
 
 
+class TestCriteriaComplexity(unittest.TestCase):
+    def test_an_enumerated_checklist_cannot_be_misclassified_as_a_single_fact(self):
+        payload = {"is_medical_query": True, "expanded_query": "criteria", "focus": "definition", "complexity": "simple"}
+        result = query_optimizer._validate_payload(payload, "List major and minor example criteria")
+        self.assertEqual(result["complexity"], "complex")
+        result = query_optimizer._validate_payload(payload, "Pathophysiology of an example condition")
+        self.assertEqual(result["complexity"], "complex")
+        result = query_optimizer._validate_payload(payload, "Define example")
+        self.assertEqual(result["complexity"], "simple")
+
+
+class TestNamedCriteriaPreservation(unittest.TestCase):
+    def test_acronym_expansion_cannot_erase_a_named_criteria_lookup_key(self):
+        raw = "List the major and minor Duke-ISCVID criteria for infective endocarditis."
+        payload = {"is_medical_query": True,
+                   "expanded_query": "major and minor Duke International Society criteria",
+                   "focus": "definition", "complexity": "simple"}
+        result = query_optimizer._validate_payload(payload, raw)
+        self.assertEqual(result["expanded_query"], raw)
+        self.assertEqual(result["complexity"], "complex")
+        payload["expanded_query"] = "Duke-ISCVID diagnostic criteria for infective endocarditis"
+        self.assertEqual(query_optimizer._validate_payload(payload, raw)["expanded_query"], payload["expanded_query"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -3,6 +3,7 @@
 import logging
 import mimetypes
 import os
+import re
 import secrets
 import threading
 import time as _time
@@ -51,13 +52,13 @@ configure_logging()
 
 log = logging.getLogger(__name__)
 
-from backend.agents.confidence_scorer import answer_declines, calculate_confidence
+from backend.agents.confidence_scorer import answer_declines, answer_has_context_gap, calculate_confidence
 from backend.agents.context_router import route_and_sort_context
 from backend.agents.query_optimizer import optimize_query
 from backend.agents.semantic_cache import SemanticCache
 from backend.api.content.hero import HERO_STEPS, RAIL
-from backend.llm.llm import ask_llm, key_manager, llm_router, resolve_models
-from backend.processing.evidence import extract_evidence, extract_sources
+from backend.llm.llm import REFUSAL_STR, ask_llm, key_manager, llm_router, resolve_models
+from backend.processing.evidence import citations_are_grounded, extract_evidence, extract_sources
 from backend.rendering.page_resolver import resolve_page_urls
 from backend.retrieval import rag
 from backend.retrieval.embeddings import embed_text, embedding_dimension
@@ -295,7 +296,7 @@ SMART_SUMMARY_RERANK_POOL = int(os.getenv("SMART_SUMMARY_RERANK_POOL", "16"))
 # on disk -- including the citation-free thyroid-storm refusal that shipped as
 # Medium -- would keep serving the pre-fix label forever.  The signature is an
 # exact-match gate, so bumping it retires them; they recompute on next ask.
-CACHE_SCHEMA_VERSION = "semantic-cache-v5"
+CACHE_SCHEMA_VERSION = "semantic-cache-v6"
 
 # --------------------------------------------------------------------
 # SEMANTIC CACHE — global singleton, loaded once at startup from disk.
@@ -603,6 +604,17 @@ def ask_question(req: QueryRequest, request: Request) -> QueryResponse:
         disable_verifier=req.disable_verifier,
     )
     answer: str = final_answer
+    declined = answer_declines(answer)
+    invalid_citations = "[p:" in answer and not citations_are_grounded(answer, retrieved_chunks)
+    if declined or invalid_citations:
+        log.warning(
+            "ask_question: refused context_declination=%s invalid_citations=%s markers=%s retrieved=%s",
+            declined, invalid_citations,
+            re.findall(r"\[p:[^\]]*\]", answer) if invalid_citations else [],
+            [(c.get("page"), c.get("chunk_id")) for c in retrieved_chunks],
+        )
+        answer = REFUSAL_STR
+        returned_path = "no_grounding"
 
     # ----------------------------------------------------------------
     # Phase 3 – populate confidence and sources from scoring pipeline.
@@ -611,6 +623,8 @@ def ask_question(req: QueryRequest, request: Request) -> QueryResponse:
     # 6. Extract unique, sorted page references for the sources field.
     #    Returns [] safely when retrieved_chunks is empty.
     sources: list[str] = extract_sources(retrieved_chunks)
+    if answer == REFUSAL_STR:
+        sources = []
 
     # 7. Calculate the deterministic confidence label.
     #    ConfidenceScorer combines two signals:
@@ -662,7 +676,7 @@ def ask_question(req: QueryRequest, request: Request) -> QueryResponse:
     # *with* a [p:3074] citation attached to a true but tangential fact about
     # subacute thyroiditis, and it shipped Medium again.  A padded refusal is
     # still a refusal, so ask the answer what it says about the context.
-    if "[p:" not in answer or answer_declines(answer):
+    if "[p:" not in answer or answer_declines(answer) or rag.index is None:
         confidence = "Low"
 
     # ── Consolidated request-level structured log (single grep-friendly line) ──
@@ -670,7 +684,7 @@ def ask_question(req: QueryRequest, request: Request) -> QueryResponse:
         "ask_question: FINAL  returned_path=%s  confidence=%s  was_truncated=%s  "
         "optimizer_failed=%s  fallback_to_original_query=%s  "
         "expanded_query_equals_raw=%s  cache_hit=False  disable_verifier=%s  "
-        "mode=%s  source_count=%d  query=%r",
+        "mode=%s  source_count=%d  was_verified=%s  query=%r",
         returned_path,
         confidence,
         was_truncated,
@@ -680,6 +694,7 @@ def ask_question(req: QueryRequest, request: Request) -> QueryResponse:
         req.disable_verifier,
         mode,
         len(sources),
+        returned_path == "verified" and answer != REFUSAL_STR,
         raw_query,
     )
 
@@ -694,11 +709,12 @@ def ask_question(req: QueryRequest, request: Request) -> QueryResponse:
     )
 
     # ── Persist only fully verified responses to semantic cache ──
-    if _should_save_to_cache(
+    if (rag.index is not None and not answer_has_context_gap(answer)
+            and citations_are_grounded(answer, retrieved_chunks) and _should_save_to_cache(
         disable_verifier=req.disable_verifier,
         returned_path=returned_path,
         was_truncated=was_truncated,
-    ):
+    )):
         _cache.save_to_cache(
             query_embedding=query_embedding,
             metadata=cache_signature,

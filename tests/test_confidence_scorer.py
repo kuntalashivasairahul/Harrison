@@ -241,5 +241,12 @@ class TestAnswerDeclines(unittest.TestCase):
         ))
 
 
+class TestIncompleteConfidence(unittest.TestCase):
+    def test_a_mid_body_context_gap_is_low_without_becoming_a_total_refusal(self):
+        answer = "Supported information [p:1]. " * 30 + "The full list is not detailed in the provided text."
+        self.assertFalse(answer_declines(answer))
+        self.assertEqual(calculate_confidence([{"score": 5.0}, {"score": 5.0}], answer, answer), "Low")
+
+
 if __name__ == "__main__":
     unittest.main()

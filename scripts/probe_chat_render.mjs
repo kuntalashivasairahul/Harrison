@@ -24,7 +24,7 @@ const esc = eval('(' + src.match(/const esc = ([\s\S]*?);\n\n/)[1] + ')');
 const inline = eval('(' + src.match(/function inline\(s\) \{[\s\S]*?\n {2}\}/)[0] + ')');
 const render = eval('(' + src.match(/function render\(md\) \{[\s\S]*?\n {2}\}/)[0] + ')');
 
-const ALLOWED = new Set(['P', 'H3', 'UL', 'LI', 'STRONG', 'BUTTON', 'DIV']);
+const ALLOWED = new Set(['P', 'H3', 'UL', 'OL', 'LI', 'STRONG', 'EM', 'BUTTON', 'DIV']);
 let failures = 0;
 
 const check = (name, cond, detail = '') => {
@@ -54,6 +54,10 @@ for (const probe of hostile) {
  *    of the retrieved context, which carries a chunk id. */
 check('renders [p:411|c:2197]', render(esc('Fluids [p:411|c:2197]')).includes('data-page="411"'));
 check('renders bare [p:411]', render(esc('Fluids [p:411]')).includes('data-page="411"'));
+check('shorthand grouped pages become separate chips', (() => {
+  const html = render(esc('Supported [p:10, 11].'));
+  return html.includes('data-page="10"') && html.includes('data-page="11"') && !html.includes('[p:');
+})());
 check('leaves no raw marker', !render(esc('a [p:411|c:2197] b [p:9]')).includes('[p:'));
 
 /* 3. A trailing citation hoists past the sentence period, or the chip's own
@@ -65,6 +69,10 @@ check('hoists citation past period', /saline\.<button/.test(hoisted), hoisted);
 check('### becomes h3', render(esc('### Fluid Replacement')).includes('<h3>Fluid Replacement</h3>'));
 check('- becomes li', render(esc('- one\n- two')).includes('<li>one</li><li>two</li>'));
 check('**x** becomes strong', render(esc('**bold**')).includes('<strong>bold</strong>'));
+check('numbered lists become ol', render(esc('1. first\n2. second')).includes('<ol><li>first</li><li>second</li></ol>'));
+check('nested list stays inside parent', render(esc('- parent\n  - child\n- sibling')).includes('<ul><li>parent<ul><li>child</li></ul></li><li>sibling</li></ul>'));
+check('organism italics render', render(esc('_Example species_')).includes('<em>Example species</em>'));
+check('star italics render', render(esc('*Example*')).includes('<em>Example</em>'));
 check('Quick Revision opens a well', render(esc('### Quick Revision\n- a')).includes('class="qr"'));
 check('Quick Revision closes', (() => {
   const h = render(esc('### Quick Revision\n- a'));
@@ -79,6 +87,18 @@ const pyRefusal = fs.readFileSync(path.join(root, 'backend/llm/llm.py'), 'utf8')
   .match(/^REFUSAL_STR = "([^"]+)"/m)[1];
 check('refusal string matches backend', jsRefusal === pyRefusal,
       `js=${JSON.stringify(jsRefusal)} py=${JSON.stringify(pyRefusal)}`);
+
+{
+  const doc = { innerHTML: '', querySelectorAll: () => [] };
+  const rail = { innerHTML: '', querySelectorAll: () => [] };
+  const confEl = {}, echoEl = {}, strip = {};
+  const output = { scrollIntoView() {} };
+  const REFUSAL = jsRefusal;
+  const SMART_SUMMARY_ACK = src.match(/const SMART_SUMMARY_ACK = '([^']+)'/)[1];
+  const show = eval('(' + src.match(/function show\(query, r\) \{[\s\S]*?\n {2}\}/)[0] + ')');
+  show('Example', { answer: '<img src=x onerror=alert(1)>', confidence: 'Low' });
+  check('actual answer display escapes untrusted HTML', !doc.innerHTML.includes('<img') && doc.innerHTML.includes('&lt;img'));
+}
 
 console.log(failures ? `\n${failures} FAILED` : '\nall passed');
 process.exit(failures ? 1 : 0);

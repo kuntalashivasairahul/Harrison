@@ -11,14 +11,14 @@ Run everything with the project runtime: `.venv312/bin/python scripts/<name>.py`
 
 | Script | Purpose |
 |---|---|
-| `ingest_tables_aware.py` | **Current ingester.** Table-aware markdown chunking → embeddings → FAISS index. Writes to `artifacts/vectorstore_staging/`. |
+| `ingest_tables_aware.py` | **Current ingester.** Table-aware markdown chunking → embeddings → FAISS index. Writes to `artifacts/vectorstore_staging/`. `--repair-headings` repairs legacy production heading metadata from the source without re-embedding, preserving text/pages/order and backing up the registry. |
 | `convert_pdf.py` | One-off: renders the source PDF to the page images under `storage/pages/`. |
 
 ## Evaluation & benchmarking
 
 | Script | Purpose |
 |---|---|
-| `evaluate_rag.py` | Evaluation harness. **RULE 5.4 requires running this before and after any retrieval-parameter change.** Needs a running API and Gemini credentials. |
+| `evaluate_rag.py` | Evaluation harness. **RULE 5.4 requires running this before and after retrieval behavior or parameter changes.** Needs a running API and Gemini credentials; uses the configured admin token to clear cached answers. Judge JSON has a separate output budget with thinking disabled. Judge errors cannot be hidden by averaging only successful scores. |
 | `benchmark_retrieval.py` | Retrieval benchmark against the production index. |
 | `benchmark_retrieval_safe.py` | Lower-memory benchmark variant. |
 | `run_benchmark.sh` | Driver for the benchmark scripts. |
@@ -30,6 +30,7 @@ Run everything with the project runtime: `.venv312/bin/python scripts/<name>.py`
 | `probe_retrieval.py` | Trace one query through every retrieval stage. `--staging` targets the staging vectorstore. |
 | `probe_environment.py` | Verify the runtime: model loads, embedding dimension, index dimension match. |
 | `probe_import_order.py` | Verify torch/sentence-transformers and FAISS coexist in one process. `--cpu` forces CPU. Import order between these has caused native crashes on Apple Silicon. |
+| `probe_chat_render.mjs` | Run with Node: checks escaping, citation formats, ordered/nested lists, italics, and the actual browser answer-display call path. No npm dependencies. |
 | `probe_benchmark_step.py` | Single benchmark step in isolation. |
 | `probe_st.py` | Minimal sentence-transformers smoke test. |
 | `probe_faiss_st.py` | Minimal FAISS + sentence-transformers smoke test. |

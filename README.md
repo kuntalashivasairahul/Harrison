@@ -48,10 +48,10 @@ For a detailed walkthrough, step-by-step trace, and sequence diagram of how cont
   required.
 
 ### 2. Environment Setup
-Clone the repository. The checked-in production vectorstore under
-`artifacts/vectorstore/` is sufficient to serve queries immediately; it
-contains a `66 MB` FAISS index and `32 MB` matching chunk registry. Do not
-separate these two files.
+Clone the repository and restore the licensed corpus using
+[`docs/CORPUS.md`](docs/CORPUS.md). `artifacts/vectorstore/` needs a matching
+`66 MB` FAISS index and `32 MB` chunk registry; neither is tracked in Git.
+Do not substitute an older index with a different embedding dimension.
 
 On macOS or Linux, initialize the Python virtual environment:
 ```bash
@@ -122,12 +122,10 @@ The server will start at `http://127.0.0.1:8000`.
 
 ### Portable Assets
 
-The production retrieval index is committed so a normal `git clone` can answer
-questions without rebuilding embeddings. It is **not** tracked in git (see `docs/CORPUS.md`)
-(see `.gitattributes`), so rebuilding the index no longer adds its full size to
-git history on every commit. Note that the copies committed before LFS was
-adopted remain as ordinary blobs in history — this stops future growth, it does
-not shrink the past. `backend/.env`, semantic-cache data,
+The licensed retrieval corpus is not tracked in Git. Restore the matching index
+and chunks using [`docs/CORPUS.md`](docs/CORPUS.md); a normal clone does not include
+them. The licensed content was removed from repository history in September
+2026. `backend/.env`, semantic-cache data,
 staging indexes, backups, rendered page images, and the original PDF are
 intentionally excluded. Copy your own keys into `backend/.env` from
 `.env.example` on each machine. The API still runs without the page-image

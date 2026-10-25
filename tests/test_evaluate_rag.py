@@ -208,7 +208,9 @@ class TestJudgeAnswer(unittest.TestCase):
             self.assertEqual(generate_call["model"], "test-judge-model")
             self.assertEqual(generate_call["contents"], "QUERY: query\n\nEXPECTED FOCUS: expected\n\nGENERATED ANSWER:\nanswer\n\nJSON evaluation:")
             self.assertEqual(generate_call["config"].kwargs["temperature"], 0.0)
-            self.assertEqual(generate_call["config"].kwargs["max_output_tokens"], 256)
+            self.assertEqual(generate_call["config"].kwargs["max_output_tokens"], 1024)
+            self.assertEqual(generate_call["config"].kwargs["response_mime_type"], "application/json")
+            self.assertEqual(generate_call["config"].kwargs["thinking_config"].thinking_budget, 0)
             self.assertIn("system_instruction", generate_call["config"].kwargs)
             self.assertFalse(any(c.get("rotate") for c in calls if isinstance(c, dict)))
         finally:
@@ -263,6 +265,25 @@ class TestJudgeAnswer(unittest.TestCase):
             evaluate_rag.key_manager = old_key_manager
             evaluate_rag.time.sleep = old_sleep
             evaluate_rag.RETRY_MAX_ATTEMPTS = old_attempts
+
+
+class TestEvaluationCompleteness(unittest.TestCase):
+    def test_a_judge_failure_cannot_be_hidden_by_a_high_average(self):
+        from unittest.mock import patch
+
+        rows = [types.SimpleNamespace(score=5, latency_s=1, query="one", confidence="High"),
+                types.SimpleNamespace(score=0, latency_s=1, query="two", confidence="Low")]
+        with patch("builtins.print"):
+            self.assertFalse(evaluate_rag.print_summary(rows))
+
+    def test_temporary_provider_failure_is_retried_without_cooling_a_key(self):
+        from unittest.mock import Mock, patch
+
+        call = Mock(side_effect=[RuntimeError("503 UNAVAILABLE"), "ok"])
+        cooldown = Mock()
+        with patch.object(evaluate_rag.time, "sleep"):
+            self.assertEqual(evaluate_rag._with_retry(call, on_rate_limit=cooldown), "ok")
+        cooldown.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -18,6 +18,7 @@ def clean_text(text: str) -> str:
       line so it only removes a standalone caption, never the tail of a line
       that begins with prose.
     """
+    text = re.sub(r"\[p:\d+(?:\|c:\d+)?\]", "", text)
     text = re.sub(r"■ ■.*", "", text)
     text = re.sub(r"\(Reproduced.*?\)", "", text)
     text = re.sub(r"(?im)^[\s*_#>-]*FIGURE\s*\d+-\d+.*$", "", text)

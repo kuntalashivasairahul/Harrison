@@ -72,6 +72,14 @@ class TestCleanText(unittest.TestCase):
         self.assertIn("Serum lipase is elevated", cleaned)
 
 
+class TestSourcePageMarkers(unittest.TestCase):
+    def test_pdf_markers_cannot_compete_with_authoritative_chunk_citations(self):
+        chunks = [{"chunk_id": 4, "page": 1080, "text": "First source sentence. [p:1] Second source sentence.", "score": 5}]
+        fused = fusion.fuse_chunks(chunks)
+        self.assertNotIn("[p:1]", fused)
+        self.assertIn("[p:1080|c:4]", fused)
+
+
 class TestFuseChunksRelevanceBudget(unittest.TestCase):
     """The budget must sacrifice the least relevant chunk, not the last one."""
 

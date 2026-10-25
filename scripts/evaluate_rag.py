@@ -54,6 +54,8 @@ load_dotenv(_ROOT / "backend" / ".env")
 from google.genai import types
 
 from backend.llm.llm import key_manager, PROD_MODEL
+from backend.llm.contracts import LLMStage
+from backend.llm.gemini_provider import GeminiProvider
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -122,7 +124,8 @@ def _with_retry(fn, *args, label: str = "call", on_rate_limit=None, **kwargs):
       4. Optionally notify the caller so direct Gemini calls can mark a key
          exhausted before retrying.
 
-    Any non-rate-limit exception propagates immediately (fail fast).
+    Non-retryable exceptions propagate immediately. Temporary service failures
+    and timeouts use the same back-off without cooling a quota key.
     Returns the result of the first successful call.
     Raises the last exception if all attempts are exhausted.
     """
@@ -139,8 +142,9 @@ def _with_retry(fn, *args, label: str = "call", on_rate_limit=None, **kwargs):
                 or "quota" in text or "resourceexhausted" in text
             )
 
-            if not is_rate_limit:
-                raise  # propagate non-rate-limit errors immediately
+            is_transient = any(marker in text for marker in ("503", "504", "unavailable", "timed out", "timeout"))
+            if not is_rate_limit and not is_transient:
+                raise  # invalid requests and credentials must fail fast
 
             last_exc = exc
             retry_after = _parse_retry_after(exc)
@@ -148,13 +152,14 @@ def _with_retry(fn, *args, label: str = "call", on_rate_limit=None, **kwargs):
             if attempt == RETRY_MAX_ATTEMPTS:
                 break  # exhausted — fall through to raise
 
-            if on_rate_limit is not None:
+            if is_rate_limit and on_rate_limit is not None:
                 on_rate_limit()
 
+            failure_label = "Rate limit" if is_rate_limit else "Temporary provider failure"
             if retry_after is not None:
                 wait = retry_after + 2.0  # small safety margin
                 print(
-                    f"\n  {YELLOW}Rate limit hit on {label} "
+                    f"\n  {YELLOW}{failure_label} on {label} "
                     f"(attempt {attempt}/{RETRY_MAX_ATTEMPTS}). "
                     f"Gemini says wait {retry_after:.0f}s — sleeping {wait:.0f}s…{RESET}",
                     flush=True,
@@ -164,7 +169,7 @@ def _with_retry(fn, *args, label: str = "call", on_rate_limit=None, **kwargs):
                 jitter = random.uniform(-0.1 * delay, 0.1 * delay)
                 wait   = min(delay + jitter, RETRY_MAX_DELAY_S)
                 print(
-                    f"\n  {YELLOW}Rate limit hit on {label} "
+                    f"\n  {YELLOW}{failure_label} on {label} "
                     f"(attempt {attempt}/{RETRY_MAX_ATTEMPTS}). "
                     f"Back-off {wait:.1f}s…{RESET}",
                     flush=True,
@@ -265,7 +270,9 @@ def _wrap(text: str, width: int = 68, indent: str = "  ") -> str:
 # ---------------------------------------------------------------------------
 
 def _http_delete(url: str, timeout: int = 10) -> dict:
-    req = urllib.request.Request(url, method="DELETE")
+    token = os.getenv("HARRISON_ADMIN_TOKEN", "")
+    headers = {"X-Admin-Token": token} if token else {}
+    req = urllib.request.Request(url, method="DELETE", headers=headers)
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read())
 
@@ -375,7 +382,9 @@ def judge_answer(query: str, expected_focus: str, answer: str) -> dict:
             config=types.GenerateContentConfig(
                 system_instruction=JUDGE_SYSTEM,
                 temperature=0.0,   # deterministic grading
-                max_output_tokens=256,
+                max_output_tokens=1024,
+                response_mime_type="application/json",
+                thinking_config=GeminiProvider._thinking_config(LLMStage.VERIFIER, JUDGE_MODEL),
             ),
         )
 
@@ -510,7 +519,7 @@ def print_summary(results: list[EvalResult]) -> bool:
     valid_scores = [r.score for r in results if r.score > 0]
     avg_score    = sum(valid_scores) / len(valid_scores) if valid_scores else 0.0
     avg_latency  = sum(r.latency_s for r in results) / len(results) if results else 0.0
-    passed       = avg_score >= PASS_THRESHOLD
+    passed       = bool(results) and len(valid_scores) == len(results) and avg_score >= PASS_THRESHOLD
 
     # Per-question table
     col_w = [4, 54, 8, 8, 10]

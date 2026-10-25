@@ -212,6 +212,14 @@ def _validate_payload(payload: dict, raw_query: str) -> OptimizedQuery | None:
     else:
         complexity = complexity.strip().lower()
 
+    if re.search(r"\b(?:criteria|checklist|scor(?:e|es|ing)|pathophysiology|pathogenesis|mechanisms?)\b", raw_query, re.IGNORECASE):
+        complexity = "complex"
+
+    if re.search(r"\b(?:criteria|checklist|score|scoring)\b", raw_query, re.IGNORECASE):
+        names = re.findall(r"\b[A-Z][A-Za-z0-9]+-[A-Z0-9][A-Za-z0-9]*\b", raw_query)
+        if any(name.lower() not in expanded.lower() for name in names):
+            expanded = raw_query
+
     return OptimizedQuery(
         is_medical_query=is_medical,
         expanded_query=expanded.strip(),

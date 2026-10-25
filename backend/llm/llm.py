@@ -625,6 +625,7 @@ def verify_answer(
     compact_prompt: bool = False,
     max_output_tokens: int | None = None,
     drafted_by_model: str | None = None,
+    question: str = "",
 ) -> tuple[str, bool, bool]:
     """
     Post-hoc verification step that checks the draft answer against
@@ -680,7 +681,10 @@ def verify_answer(
             "4. Only remove statements that cannot be supported at all.\n"
             "5. Preserve explanations, reasoning, and level of detail whenever possible.\n"
             "6. Ensure page citations correspond to pages present in the context.\n"
-            "7. Do NOT invent new page numbers.\n\n"
+            "7. Do NOT invent new page numbers.\n"
+            "8. When the draft summarizes diagnostic or scoring criteria, restore any "
+            "criteria it omitted that are explicitly present in the context.\n"
+            "9. Stay within the supplied clinical question; do not replace the answer with a general overview.\n\n"
             "<output_format>\n"
             "CRITICAL: You are an invisible middle-layer verification filter, NOT a conversational assistant. "
             "Do NOT output meta-commentary. Do NOT output phrases like 'The context supports the draft' or "
@@ -692,7 +696,7 @@ def verify_answer(
             "</output_format>\n"
         )
 
-    verify_user = (
+    verify_user = (f"Clinical question: {question}\n\n" if question else "") + (
         "Harrison Context:\n"
         + context
         + "\n\nDraft Answer:\n"
@@ -774,7 +778,7 @@ You are HarrisonGPT, a rigorous clinical synthesis engine grounded EXCLUSIVELY i
 
 <core_directives>
 1. ANSWER THE SPECIFIC QUESTION: Focus entirely on the user's prompt. If asked for pathophysiology, do not output management.
-2. NO OUTSIDE KNOWLEDGE: Every fact must originate from the provided Context. If context is missing, omit the claim.
+2. NO OUTSIDE KNOWLEDGE: Every fact must originate from the provided Context. If context is missing, omit the claim. If the context cannot support the requested answer or complete criteria list, return exactly: Insufficient information in the provided context.
 3. MANDATORY CITATIONS: You MUST append inline page markers for every medical claim using the exact format found in the context (e.g., [p:2157]). Never invent page numbers.
 </core_directives>
 
@@ -925,6 +929,7 @@ def ask_llm(
         + ("\n\nHarrison Smart Summary:\n" if mode == "smart_summary" else "\n\nAnswer:\n")
     )
 
+    verification_context = fused_context + evidence_lines
     last_exc: Exception | None = None
     for attempt in range(DRAFT_MAX_ATTEMPTS):
         try:
@@ -993,8 +998,8 @@ def ask_llm(
             # failover, not the one the priority order started with, so it is
             # the only value that keeps the verifier independent.
             verified, verifier_truncated, verification_ran = verify_answer(
-                draft_answer, fused_context, mode=mode, model=model,
-                drafted_by_model=result.model,
+                draft_answer, verification_context, mode=mode, model=model,
+                drafted_by_model=result.model, question=question,
             )
             t_verify_end = time.perf_counter()
             if timings is not None:
@@ -1010,12 +1015,12 @@ def ask_llm(
                 t_retry_start = time.perf_counter()
                 verified_retry, verifier_truncated_retry, retry_ran = verify_answer(
                     draft_answer,
-                    fused_context,
+                    verification_context,
                     mode=mode,
                     model=model,
                     compact_prompt=True,
                     max_output_tokens=generation_max_tokens,
-                    drafted_by_model=result.model,
+                    drafted_by_model=result.model, question=question,
                 )
                 t_retry_end = time.perf_counter()
                 if timings is not None:

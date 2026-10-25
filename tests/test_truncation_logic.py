@@ -70,5 +70,22 @@ class TestTruncationLogic(unittest.TestCase):
         self.assertEqual(path, "graceful_fallback")
 
 
+class TestVerifierGrounding(unittest.TestCase):
+    def test_verifier_receives_the_same_evidence_as_the_draft(self):
+        from types import SimpleNamespace
+
+        with patch.object(llm, "llm_router") as router, \
+             patch.object(llm, "verify_answer", return_value=("Supported [p:2].", False, True)) as verify:
+            router.generate_for_stage.return_value = SimpleNamespace(
+                text="Supported [p:2].", truncated=False, model="draft-model")
+            llm.ask_llm(
+                fused_context="Primary source context longer than twenty characters.",
+                question="Example question",
+                evidence=["Additional source evidence [p:2]."],
+            )
+        self.assertIn("Additional source evidence [p:2].", verify.call_args.args[1])
+        self.assertEqual(verify.call_args.kwargs["question"], "Example question")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -28,12 +28,14 @@
   function inline(s) {
     return s
       .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+      .replace(/(^|[\s>(])_([^_\n]+)_(?=$|[\s.,;:!?<)])/g, '$1<em>$2</em>')
+      .replace(/\*([^*\n]+)\*/g, '<em>$1</em>')
       // The model sometimes groups multiple pages in one bracket, e.g.
       // "[p:1079, p:1080]", even though the prompt asks for one marker per
       // claim. Split those into separate brackets so the single-citation
       // rules below handle each page as its own chip.
-      .replace(/\[((?:p:\d+(?:\|c:\d+)?\s*,\s*)+p:\d+(?:\|c:\d+)?)\]/g,
-        (_, group) => group.split(/\s*,\s*/).map((c) => `[${c}]`).join(''))
+      .replace(/\[(p:\d+(?:\|c:\d+)?(?:\s*,\s*(?:p:)?\d+(?:\|c:\d+)?)+)\]/g,
+        (_, group) => group.split(/\s*,\s*/).map((c) => `[${c.startsWith("p:") ? c : "p:" + c}]`).join(''))
       // The model copies the marker format out of the retrieved context, which
       // carries a chunk id: [p:411|c:2197].  It sometimes emits the bare
       // [p:411] the prompt asks for.  Both forms have to render.
@@ -44,14 +46,15 @@
   }
 
   function render(md) {
-    const out = [];
-    let list = null, quick = false;
-    const flush = () => { if (list) { out.push('<ul>' + list.join('') + '</ul>'); list = null; } };
+    const out = [], lists = [];
+    let quick = false;
+    const flush = () => {
+      while (lists.length) out.push('</li></' + lists.pop().tag + '>');
+    };
 
     for (const raw of md.split('\n')) {
       const line = raw.trim();
-      if (!line) { flush(); continue; }
-
+      if (!line) continue;
       const h = line.match(/^#{1,6}\s+(.*)$/);
       if (h) {
         flush();
@@ -62,9 +65,22 @@
         continue;
       }
 
-      const li = line.match(/^[-*•]\s+(.*)$/);
-      if (li) { (list ||= []).push('<li>' + inline(li[1]) + '</li>'); continue; }
-
+      const li = raw.match(/^(\s*)([-*•]|\d+[.)])\s+(.*)$/);
+      if (li) {
+        const indent = li[1].replace(/\t/g, '    ').length;
+        const tag = /^\d/.test(li[2]) ? 'ol' : 'ul';
+        while (lists.length && (indent < lists.at(-1).indent ||
+               (indent === lists.at(-1).indent && tag !== lists.at(-1).tag))) {
+          out.push('</li></' + lists.pop().tag + '>');
+        }
+        if (lists.length && indent === lists.at(-1).indent) {
+          out.push('</li><li>' + inline(li[3]));
+        } else {
+          out.push('<' + tag + '><li>' + inline(li[3]));
+          lists.push({ indent, tag });
+        }
+        continue;
+      }
       flush();
       out.push('<p>' + inline(line) + '</p>');
     }
@@ -182,7 +198,13 @@
     if (!res.ok) {
       if (res.status === 429) return fail('Too many questions in a short window. Give it a moment.');
       if (res.status === 503) return fail('The service is degraded — the index or a model key is unavailable.');
-      return fail((data && data.detail) || `Request failed (${res.status}).`);
+      const detail = data && data.detail;
+      return fail(typeof detail === 'string' ? detail :
+        Array.isArray(detail) ? detail.map((item) => item.msg).join('; ') :
+        `Request failed (${res.status}).`);
+    }
+    if (!data || typeof data.answer !== 'string') {
+      return fail('The server returned an invalid answer. Please try again.');
     }
     show(query, data);
   }
@@ -217,7 +239,7 @@
         '<p class="why">The retrieved passages did not support an answer, so none ' +
         'was written. Rephrasing may help; inventing a citation would not.</p></div>';
     } else {
-      doc.innerHTML = render(answer);
+      doc.innerHTML = render(esc(answer));
     }
 
     // page rail

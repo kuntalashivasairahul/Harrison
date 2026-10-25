@@ -37,6 +37,8 @@ class _ApiTestCase(unittest.TestCase):
     """Isolates the module-level semantic cache from the real cache file."""
 
     def setUp(self):
+        with main._rate_lock:
+            main._rate_hits.clear()
         self._cache = MagicMock()
         self._cache.check_cache.return_value = None
         self._cache.size = 0
@@ -252,7 +254,7 @@ class TestConfidenceCaps(_ApiTestCase):
 
     def _ask(self, returned_path, was_truncated, scored="High", answer="final [p:12]"):
         with patch.object(main, "optimize_query", return_value=_optimized()), \
-             patch.object(main, "retrieve", return_value=[{"chunk_id": 1, "page": 1, "text": "t", "score": 0.5}]), \
+             patch.object(main, "retrieve", return_value=[{"chunk_id": 1, "page": 12, "text": "t", "score": 0.5}]), \
              patch.object(main, "route_and_sort_context", side_effect=lambda c: c), \
              patch.object(main, "fuse_context", return_value="context " * 20), \
              patch.object(main, "extract_evidence", return_value=[]), \
@@ -292,7 +294,7 @@ class TestConfidenceCaps(_ApiTestCase):
                 self.assertEqual(self._ask(path, False, answer="no citation here"), "Low")
 
     def test_a_cited_answer_is_untouched_by_the_rule(self):
-        self.assertEqual(self._ask("verified", False, answer="Supported claim [p:2775]."), "High")
+        self.assertEqual(self._ask("verified", False, answer="Supported claim [p:12]."), "High")
 
     def test_a_cited_refusal_is_still_forced_low(self):
         """The first version of this cap only checked for a citation.  Re-run
@@ -305,6 +307,32 @@ class TestConfidenceCaps(_ApiTestCase):
             "radioactive iodine uptake is low [p:3074]."
         )
         self.assertEqual(self._ask("verified", False, answer=padded), "Low")
+
+
+class TestGroundingFailures(_ApiTestCase):
+    def test_missing_index_caps_even_a_verified_answer_at_low(self):
+        with patch.object(main.rag, "index", None):
+            self.assertEqual(TestConfidenceCaps._ask(self, "verified", False), "Low")
+
+    def test_free_form_refusal_is_canonical_and_not_cached(self):
+        with patch.object(main, "optimize_query", return_value=_optimized()), \
+             patch.object(main, "retrieve", return_value=[]), \
+             patch.object(main, "ask_llm", return_value=(
+                 "The provided context does not describe this topic.", "", False, "verified")):
+            response = self.client.post("/ask", json={"query": "example question", "mode": "qa"}).json()
+        self.assertEqual(response["answer"], main.REFUSAL_STR)
+        self.assertEqual(response["sources"], [])
+        self._cache.save_to_cache.assert_not_called()
+
+
+class TestInventedCitations(_ApiTestCase):
+    def test_nonexistent_cited_page_returns_refusal_and_is_not_cached(self):
+        with patch.object(main, "optimize_query", return_value=_optimized()), \
+             patch.object(main, "retrieve", return_value=[{"page": 1, "chunk_id": 1, "text": "Context", "score": 5}]), \
+             patch.object(main, "ask_llm", return_value=("Unsupported [p:999].", "", False, "verified")):
+            response = self.client.post("/ask", json={"query": "example"}).json()
+        self.assertEqual(response["answer"], main.REFUSAL_STR)
+        self._cache.save_to_cache.assert_not_called()
 
 
 class TestHealthEndpoint(_ApiTestCase):
@@ -362,7 +390,7 @@ class TestCachedVisualContextIsHostIndependent(_ApiTestCase):
              patch.object(main, "route_and_sort_context", side_effect=lambda c: c), \
              patch.object(main, "fuse_context", return_value="context " * 20), \
              patch.object(main, "extract_evidence", return_value=[]), \
-             patch.object(main, "ask_llm", return_value=("final", "final", False, "verified")), \
+             patch.object(main, "ask_llm", return_value=("final [p:142]", "final [p:142]", False, "verified")), \
              patch.object(main, "calculate_confidence", return_value="High"):
             self.client.post("/ask", json={"query": "q"})
 

@@ -25,6 +25,8 @@ def normalize_provider_error(exc: Exception, provider: str) -> LLMError:
     # the "rate_limit" and "does not exist" spellings above.
     if any(marker in text for marker in ("timeout", "timed out", "deadline exceeded", "deadline_exceeded", "504")):
         return LLMError(LLMErrorCategory.TIMEOUT, str(exc), provider=provider)
+    if any(marker in text for marker in ("tier_not_allowed", "not available in your subscription tier")):
+        return LLMError(LLMErrorCategory.NOT_FOUND, str(exc), provider=provider)
     if any(marker in text for marker in ("401", "403", "api key", "authentication", "permission denied")):
         return LLMError(LLMErrorCategory.AUTH, str(exc), provider=provider)
     # Checked before the 400/invalid-argument rule — which is where this

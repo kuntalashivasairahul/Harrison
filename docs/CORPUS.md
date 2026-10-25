@@ -73,6 +73,18 @@ cp ~/Harrison_corpus_archive/artifacts/vectorstore/{chunks.json,index.faiss} art
 
 `.gitignore` covers all of these, so a restore cannot re-commit them.
 
+After restoring legacy chunks, preserve table context with:
+
+```bash
+.venv312/bin/python scripts/ingest_tables_aware.py --repair-headings
+```
+
+This requires the original `data/harrison.md`. It changes only unambiguously
+matched table-heading metadata, preserves text, ordering, pages, and vectors,
+and backs up the original registry as `chunks.headings-backup.json` before its
+first write. Repeated runs are idempotent. Restart the app and clear its semantic
+cache after a corpus repair; do not reuse answers generated from older context.
+
 > This archive lives on one disk. It is not a backup until it exists somewhere
 > else too — an external drive or a private cloud folder. Do that.
 

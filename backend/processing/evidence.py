@@ -1,4 +1,6 @@
 
+import re
+
 from backend.utils.fusion import clean_text
 
 
@@ -106,3 +108,20 @@ def extract_sources(chunks: list[dict]) -> list[str]:
         ordered = sorted(seen, key=str)
 
     return [f"p.{p}" for p in ordered]
+
+
+def citations_are_grounded(answer: str, chunks: list[dict]) -> bool:
+    """Require every cited page and optional chunk ID to belong to retrieved evidence."""
+    markers = re.findall(r"\[p:[^\]\n]*\]", answer)
+    if not markers or answer.count("[p:") != len(markers):
+        return False
+    pages = {str(c.get("page")) for c in chunks if c.get("page") is not None}
+    pairs = {(str(c.get("page")), str(c.get("chunk_id"))) for c in chunks}
+    for marker in markers:
+        for token in marker[1:-1].split(","):
+            match = re.fullmatch(r"(?:p:)?(\d+)(?:\|c:(\d+))?", token.strip())
+            if match is None or match[1] not in pages:
+                return False
+            if match[2] is not None and (match[1], match[2]) not in pairs:
+                return False
+    return True

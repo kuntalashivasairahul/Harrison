@@ -145,6 +145,17 @@ class TestErrorNormalization(unittest.TestCase):
                 self.assertIn(error.category, FALLBACK_ELIGIBLE)
 
 
+class TestSubscriptionTierError(unittest.TestCase):
+    def test_model_tier_denial_falls_over_but_invalid_credentials_do_not(self):
+        from backend.llm.contracts import LLMErrorCategory
+        from backend.llm.gemini_provider import normalize_provider_error
+        from backend.llm.router import FALLBACK_ELIGIBLE
+
+        error = normalize_provider_error(Exception('403 tier_not_allowed: This model is not available in your subscription tier'), "mistral")
+        self.assertIn(error.category, FALLBACK_ELIGIBLE)
+        self.assertEqual(normalize_provider_error(Exception("403 invalid API key"), "mistral").category, LLMErrorCategory.AUTH)
+
+
 class TestRegistryBudget(unittest.TestCase):
     def test_draft_ceiling_fits_a_full_smart_summary_plus_thinking(self):
         from backend.llm.llm import SMART_SUMMARY_MAX_TOKENS
